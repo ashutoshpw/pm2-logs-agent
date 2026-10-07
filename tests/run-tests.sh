@@ -41,6 +41,15 @@ group(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 VECTOR_IMG=""
 if command -v docker >/dev/null 2>&1; then
   VECTOR_IMG="$VECTOR_CI_IMAGE"
+  # Pull both images BEFORE any test runs.
+  #
+  # Without this the first `docker run` triggers the pull, and the pull's
+  # progress output lands on the same stdout as the VRL result. The first test
+  # in the suite then reads pull noise instead of JSON and fails, while every
+  # later test passes — a confusing, order-dependent failure seen in CI.
+  for img in "$VECTOR_CI_IMAGE" "timberio/vector:${VECTOR_KNOWN_GOOD_FLOOR}-debian"; do
+    [ -n "$img" ] && docker pull -q "$img" >/dev/null 2>&1
+  done
 fi
 if [ "$SKIP_VECTOR" = "yes" ] || [ -z "$VECTOR_IMG" ]; then
   VECTOR_IMG=""
@@ -92,6 +101,12 @@ if [ -n "$VECTOR_IMG" ]; then
   for f in "${!EXPECT_APP[@]}"; do
     out="$(vrl_run "$f" parse-app.vrl)"
     want="${EXPECT_APP[$f]}"
+    if ! printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+      # Distinguish "VRL produced no JSON" from "VRL produced the wrong app".
+      # Confusing these is what made a docker pull race look like a VRL bug.
+      bad "$f -> app" "no JSON from vector vrl: $(printf '%s' "$out" | head -2)"
+      continue
+    fi
     got="$(printf '%s' "$out" | jq -r '.app' 2>/dev/null)"
     if [ "$got" = "$want" ]; then ok "$f -> app=$want"; else bad "$f -> app" "expected '$want', got '$got'"; fi
   done
