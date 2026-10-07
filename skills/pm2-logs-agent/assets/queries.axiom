@@ -1,6 +1,16 @@
 # pm2-logs-agent — Axiom verification queries
 #
-# Paste into Axiom's query editor. Replace the dataset names if yours differ.
+# Paste into Axiom's query editor.
+#
+# DEFAULT DATASET: pm2-service-logs, holding BOTH the logs and the host-insights
+# streams. Every event carries a `kind` field:
+#
+#   kind == "pm2_log"        application logs
+#   kind == "host_insights"  the 30-minute server snapshot
+#
+# So every query below filters on kind. If you split the streams with
+# --insights-dataset, replace the insights dataset name instead.
+#
 # Run these AFTER enabling the pipeline; they are the checklist that proves data
 # actually landed and carries the expected fields.
 #
@@ -9,14 +19,14 @@
 # ---------------------------------------------------------------------------
 # Empty result means the pipeline is broken, not that the apps are quiet. Check
 # the source before concluding anything about application health.
-pm2-logs | where _time > ago(15m) | summarize count() as events, max(_time) as newest
+pm2-service-logs | where kind == "pm2_log" and _time > ago(15m) | summarize count() as events, max(_time) as newest
 
 # ---------------------------------------------------------------------------
 # 2. Per-app volume — proves the filename parsing works
 # ---------------------------------------------------------------------------
 # Every row must have a real app name. If `app` is null or "pm2-daemon" for
 # everything, parse-app.vrl is not applied.
-pm2-logs | where _time > ago(1h)
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h)
   | summarize count() as events, count_distinct(app) as apps by app
   | order by events desc
 
@@ -25,7 +35,7 @@ pm2-logs | where _time > ago(1h)
 # ---------------------------------------------------------------------------
 # `machine` is mandatory. One row per machine expected. More than one means
 # several hosts share a dataset, which is fine and intended.
-pm2-logs | where _time > ago(1h)
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h)
   | summarize count() as events by machine
   | order by events desc
 
@@ -37,12 +47,12 @@ pm2-logs | where _time > ago(1h)
 #   - a dataset with a LOCKED schema, which silently DROPS unknown fields
 #   - Vector not having been restarted after the env file changed
 # Then confirm the field exists in the dataset's Fields panel.
-pm2-logs | where _time > ago(1h) and machine == "web-01" | limit 1
-pm2-logs | where _time > ago(1h) and public_ip != null      | limit 1
-pm2-logs | where _time > ago(1h) and tailscale_ip != null   | limit 1
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h) and machine == "web-01" | limit 1
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h) and public_ip != null      | limit 1
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h) and tailscale_ip != null   | limit 1
 
 # Machines missing an optional tag — useful after rolling out a new tag.
-pm2-logs | where _time > ago(1h)
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h)
   | summarize has_ip = countif(public_ip != null) by machine
   | where has_ip == 0
 
@@ -51,14 +61,14 @@ pm2-logs | where _time > ago(1h)
 # ---------------------------------------------------------------------------
 # severity == "error" comes from the `-error-` filename segment, so this is a
 # true stderr filter rather than a text match on the message body.
-pm2-logs | where _time > ago(1h) and severity == "error"
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h) and severity == "error"
   | summarize count() as errors by app
   | order by errors desc
 
 # ---------------------------------------------------------------------------
 # 6. Which app is throwing the most
 # ---------------------------------------------------------------------------
-pm2-logs | where _time > ago(1h) and severity == "error"
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h) and severity == "error"
   | summarize errors = count() by app
   | order by errors desc
   | limit 10
@@ -66,7 +76,7 @@ pm2-logs | where _time > ago(1h) and severity == "error"
 # ---------------------------------------------------------------------------
 # 7. Log volume over time
 # ---------------------------------------------------------------------------
-pm2-logs | where _time > ago(24h)
+pm2-service-logs | where kind == "pm2_log" and _time > ago(24h)
   | summarize count() by bin(_time, 10m)
   | order by bin asc
 
@@ -76,7 +86,7 @@ pm2-logs | where _time > ago(24h)
 # If this returns thousands of distinct values for a field that should be
 # bounded, something is tagging an unbounded value (request id, container id)
 # and the column should be removed at the source.
-pm2-logs | where _time > ago(1h) | summarize count_distinct(app) as d_app, count_distinct(machine) as d_machine
+pm2-service-logs | where kind == "pm2_log" and _time > ago(1h) | summarize count_distinct(app) as d_app, count_distinct(machine) as d_machine
 
 # ===========================================================================
 # Host insights (separate dataset, Kind = Metrics)
@@ -86,7 +96,7 @@ pm2-logs | where _time > ago(1h) | summarize count_distinct(app) as d_app, count
 # 9. Is the 30-minute heartbeat alive?
 # ---------------------------------------------------------------------------
 # Expect roughly 2 rows per hour. Expect ~6 in a 3h window.
-pm2-host-insights | where _time > ago(3h)
+pm2-service-logs | where kind == "host_insights" and _time > ago(3h)
   | summarize ticks = count(), first = min(_time), last = max(_time)
 
 # ---------------------------------------------------------------------------
@@ -94,13 +104,14 @@ pm2-host-insights | where _time > ago(3h)
 # ---------------------------------------------------------------------------
 # Must return EMPTY when healthy. 45m gives margin over the 30m interval.
 # Anything returned means the insights pipeline stopped.
-pm2-host-insights | summarize last = arg_max(_time, _time) | where last < ago(45m)
+pm2-service-logs | where kind == "host_insights"
+  | summarize last = arg_max(_time, _time) | where last < ago(45m)
 
 # ---------------------------------------------------------------------------
 # 11. Per-disk usage — mv-expand turns the disks array into one row per mount
 # ---------------------------------------------------------------------------
 # This is why disks is an array: mv-expand is the only way to get per-disk rows.
-pm2-host-insights | where _time > ago(6h) | mv-expand disks
+pm2-service-logs | where kind == "host_insights" and _time > ago(6h) | mv-expand disks
   | project _time, machine, disks.mount, disks.fs_type, disks.used_pct
   | where disks.used_pct > 80
   | order by _time desc
@@ -108,7 +119,7 @@ pm2-host-insights | where _time > ago(6h) | mv-expand disks
 # ---------------------------------------------------------------------------
 # 12. Which disks are filling up, worst first
 # ---------------------------------------------------------------------------
-pm2-host-insights | where _time > ago(6h) | mv-expand disks
+pm2-service-logs | where kind == "host_insights" and _time > ago(6h) | mv-expand disks
   | summarize latest = arg_max(disks.used_pct, _time) by machine, disks.mount
   | order by latest desc
 
@@ -118,7 +129,7 @@ pm2-host-insights | where _time > ago(6h) | mv-expand disks
 # ram.total_bytes is the EFFECTIVE capacity: the cgroup limit when
 # containerised, the host total on bare metal. ram.host_total_bytes is always
 # the physical host figure, present for context.
-pm2-host-insights | where _time > ago(6h)
+pm2-service-logs | where kind == "host_insights" and _time > ago(6h)
   | project _time, machine, scope, load1 = load.load1, load_pct = load.pct_of_capacity,
            ram_used_pct = ram.used_pct, ram_total = ram.total_bytes,
            ram_host_total = ram.host_total_bytes, cpu_busy = cpu.busy_pct
@@ -127,7 +138,7 @@ pm2-host-insights | where _time > ago(6h)
 # ---------------------------------------------------------------------------
 # 14. Cross-compare machines
 # ---------------------------------------------------------------------------
-pm2-host-insights | where _time > ago(6h)
+pm2-service-logs | where kind == "host_insights" and _time > ago(6h)
   | summarize max_ram = max(ram.used_pct), max_load = max(load.pct_of_capacity) by machine
 
 # ---------------------------------------------------------------------------
@@ -136,7 +147,7 @@ pm2-host-insights | where _time > ago(6h)
 # A non-zero `failed` means df/statvfs could not read some mount (usually a
 # directory without o+x for a non-root Vector user). Those disks are missing
 # from the array, so any per-disk query above is INCOMPLETE for this machine.
-pm2-host-insights | where _time > ago(6h) and disk_coverage.failed > 0
+pm2-service-logs | where kind == "host_insights" and _time > ago(6h) and disk_coverage.failed > 0
   | project _time, machine, disk_coverage
 
 # ---------------------------------------------------------------------------
@@ -145,7 +156,15 @@ pm2-host-insights | where _time > ago(6h) and disk_coverage.failed > 0
 # Inside a container, load and RAM come from the host unless a cgroup limit
 # applies. scope == "container" with cgroup.mem_max_bytes == null means no
 # limit is set, so capacity falls back to the host figure.
-pm2-host-insights | where _time > ago(1h)
+pm2-service-logs | where kind == "host_insights" and _time > ago(1h)
   | project _time, machine, scope, cores_total = cpu.cores_total,
            cores_eff = cpu.cores_effective, cgroup_mem_max = cgroup.mem_max_bytes
   | order by _time desc
+# ---------------------------------------------------------------------------
+# 17. Remove probe records written by scripts/validate-token.sh
+# ---------------------------------------------------------------------------
+# That script writes one record per real run, marked self_test. Clean them up
+# once the token is confirmed.
+pm2-service-logs
+  | where kind == "pm2-log-agent-selftest" and self_test == true and _time > ago(1h)
+  | summarize probe_ids = make_set(probe_id), count()

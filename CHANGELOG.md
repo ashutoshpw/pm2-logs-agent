@@ -1,62 +1,76 @@
 # Changelog
 
+## 1.1.0
+
+Bugs found by a field report, all verified against the pinned Vector binary.
+
+### Fixed — configuration
+
+- **Axiom token never reached the sink.** The sink carried a literal
+  `REPLACE_AT_INSTALL_TIME` placeholder and no code read `AXIOM_TOKEN`, so the
+  pipeline could not have authenticated. The sink's `token` and `dataset` are
+  config values rather than VRL, so `{{ get_env_var!(...) }}` is a parse error;
+  they now use `${VAR}` interpolation with the unit setting
+  `VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true`. A missing variable now
+  aborts config load instead of silently 401ing every batch.
+- **`--require-healthy` was passed without a value**, which stops the service
+  parsing its own command line.
+- **Every `$` in a comment is substituted once interpolation is on.** A comment
+  containing `${VAR}` aborted the whole config. Written as `$${VAR}`.
+- **Multi-line patterns used `\\s` inside single-quoted TOML**, where backslashes
+  are literal, so the regex matched nothing while `vector validate` still passed.
+- **`start_pattern` matched only exceptions.** Under `continue_through` a line
+  matching neither pattern is swallowed as a continuation, so this silently
+  dropped ALL normal logging — measured 0 events from a normal log file.
+- **The insights pipeline was never wired to a config.** It now loads as a second
+  `--config` argument to the same process. Component ids were renamed to avoid a
+  namespace collision, and the duplicate `data_dir` global was removed.
+- **Rotated archives were re-uploaded on every run.** `pm2-logrotate` names
+  rotated files `<file>.log-<date>`, which matches the `*.log` include glob. The
+  exclude list now covers both rotated forms.
+
+### Added
+
+- `scripts/validate-token.sh` — proves ingest permission by writing one probe
+  record, tagged `kind = "pm2-log-agent-selftest"` and `self_test = true` so it
+  can be found and deleted. Never prints the token. Handles the two Axiom URL
+  shapes, which differ between the default domain and an edge deployment.
+- `scripts/smoke-test.sh` — runs the real pipeline with the Axiom sink swapped
+  for console, and asserts events actually come out. `vector validate` does not
+  do this.
+- `scripts/install.sh` — installs env file, ACLs, configs, insights script and
+  the unit. Leaves the unit **disabled** on purpose.
+- `scripts/uninstall.sh` — removes all of it, restoring backups, and only
+  uninstalls `pm2-logrotate` when this skill installed it.
+
+### Changed
+
+- Both streams default to one dataset, **`pm2-service-logs`**, separated by a
+  `kind` field (`pm2_log` / `host_insights`). `--insights-dataset` splits them.
+  Retention is a dataset-level setting and is not managed here.
+- Rendered configs are stamped `# managed-by: pm2-logs-agent`, and the audit
+  skips its own config instead of reporting a false duplicate-ingest conflict.
+- Audit enumerates collector **units** and reports each one's `ExecStart`,
+  binary, version and config paths. An unrelated `vector.service` no longer
+  counts as "collector enabled at boot".
+- Audit prunes `/etc/vector/examples` from the config count, extracts
+  `unstable_restarts` to catch restart loops, tests whether the Vector user can
+  actually **read** each log file, and reports log files belonging to no live app.
+- RISKY actions: "never execute" replaced with re-check, back up, then hand over
+  a single command.
+
+### Fixed — tooling
+
+- The Vector release tarball extracts to `vector-<arch>-<libc>/bin/`, not a
+  version-prefixed path; the installer was looking for the wrong one.
+- ACLs now include a **default** ACL, without which every file created by
+  rotation becomes unreadable and ingestion stops silently after the first
+  rotation.
+
 ## 1.0.0
 
 ### Changed
-- Skill payload lives at `skills/pm2-logs-agent/`. `skills/` is a first-class
-  discovery location in the spec, and keeping the payload there means the repo
-  README, licence, CI and test suite no longer ship into every agent install.
-  Only `scripts/`, `references/` and `assets/` travel with the skill.
+- Skill payload lives at `skills/pm2-logs-agent/`, so the repo README, licence,
+  CI and test suite no longer ship into every agent install.
 
 Initial release.
-
-### Audit
-- `scripts/audit-pm2-logs.sh` — read-only audit of PM2 runtime state, real log
-  paths, restart survivability, installed collectors, rotation, network identity
-  and disk capacity. Emits structured JSON with severity-rated findings.
-- Detects the two silent reboot failures: apps returning with no logs collected,
-  and a healthy collector receiving zero data.
-- Flags that `pm2 save` **overwrites** the snapshot with the current process list,
-  naming the apps that would be dropped.
-- Detects a `pm2-<user>` unit pointing at a Node path that no longer exists, which
-  fails silently at boot.
-- Downgrades `pm2 save` findings on containers, where the mechanism does not apply.
-- Downgrades app-level noise (`errored` status) so logging findings stay distinct
-  from application failures.
-
-### Remediation
-- `scripts/render-vector-config.sh` — renders a host-specific config with include
-  globs derived from `pm2 jlist`, and inlines the VRL programs.
-- `scripts/install-vector-pinned.sh` — installs an exact Vector version with an
-  architecture/libc-aware asset selection and a sha256 gate.
-- `scripts/verify-post-change.sh` — re-checks invariants, including public-IP drift.
-
-### Identity
-- `machine` tag is mandatory; `public_ip` and `tailscale_ip` are optional and
-  omitted cleanly when unavailable.
-- `scripts/probe-network.sh` — best-effort public IPv4 and Tailscale IPv4 probing.
-- `scripts/validate-tags.sh` — reserved-name, IPv4, cardinality, permissions and
-  policy/VRL consistency checks.
-- `AXIOM_REGION` is optional and unset by default.
-
-### Insights
-- `assets/host-insights.sh` — server-wide CPU, load, RAM and per-disk snapshot every
-  30 minutes, in a separate Metrics-kind dataset.
-- Effective capacity from cgroup limits when containerised, so a 2 GB container does
-  not report 3% of a 128 GB host.
-- Explicit `disk_coverage` so partial reads are visible rather than silent.
-- True CPU busy% from a `/proc/stat` delta, independent of `sysstat`.
-
-### Pipeline
-- PM2 logs to Axiom via Vector, with `app`, `stream`, `severity` and `pm2_pid`
-  derived from the log filename, and multi-line stack-trace aggregation.
-- Disk buffer with a 512 MiB floor and `block` back-pressure.
-- Credentials read at runtime via `get_env_var`, so no
-  `--dangerously-allow-env-var-interpolation` flag is required.
-- Vector pinned to 0.59.0; templates validated against 0.58.0 as well.
-
-### Safety
-- Default mode is audit-only; no write occurs without explicit per-action approval.
-- Four-tier risk model; RISKY actions are generated but never executed.
-- Verified against the pinned binary: `._time` as a field path, tags merged
-  outside `for_each`, `include_stderr = false`, and `region` genuinely optional.

@@ -10,12 +10,13 @@
 # custom out_file writes outside ~/.pm2/logs and is silently missed.
 #
 # CREDENTIALS come from EnvironmentFile=/etc/vector/pm2-axiom.env (mode 0600).
-# They are deliberately NOT interpolated with ${VAR} here. Vector disables
-# config-file env interpolation unless
-# --dangerously-allow-env-var-interpolation is passed, and
-# VECTOR_STRICT_ENV_VARS defaults to true, so a missing variable is a hard
-# load failure. render-vector-config.sh wires the env-file-backed sink; see
-# references/risk-tiers.md for the full explanation.
+# Credentials come from the EnvironmentFile at config-load time; see the sink
+# section below. The systemd unit sets
+# VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true to permit that.
+#
+# NOTE for anyone editing this file: once interpolation is enabled, EVERY
+# dollar-brace sequence is substituted, INCLUDING inside comments. Writing
+# $${VAR} in a comment escapes it to a literal. See references/risk-tiers.md.
 
 data_dir = "/var/lib/vector"
 
@@ -48,12 +49,19 @@ fingerprint.strategy = "checksum"
 fingerprint.lines = 3
 max_line_bytes = 32768
 
-# Bridge the copytruncate gap. Vector's docs recommend pairing delaycompress
-# on the logrotate side with including the FIRST rotated file here, so Vector
-# can re-read a rotated file and pick up anything written between its last
-# read and the rotation event. pm2-logrotate compresses by default, so the
-# pattern below matches both the live and first-rotated files.
+# Never ingest rotated archives.
+#
+# pm2-logrotate appends a dateFormat suffix (default YYYY-MM-DD_HH-mm-ss), so a
+# rotated file is api-out-0.log-2026-10-07_12-00-00 — which MATCHES the
+# `*.log` include glob. Without this exclude, every rotated file is re-uploaded
+# to Axiom once and then re-uploaded again on each restart that loses its
+# checkpoint.
+#
+# Only *.gz is excluded, not the uncompressed rotated name: Vector's guidance is
+# to let it re-read the first rotated file uncompressed to close the
+# copytruncate gap. See references/pm2-log-layout.md.
 exclude = [
+  "/home/deploy/.pm2/logs/*.log-*.gz",
   "/home/deploy/.pm2/logs/*.log.*.gz",
 ]
 
@@ -69,10 +77,23 @@ exclude = [
 #                         continue it
 # This is the one genuinely app-specific part of the pipeline; adjust for
 # Java/Python tracebacks. See references/pm2-log-layout.md.
+# NOTE ON BACKSLASHES: these are TOML *literal* strings (single quotes), so
+# backslashes are NOT escapes. Every regex metacharacter class must therefore be
+# written with a SINGLE backslash. `\\s` reaches VRL as a literal backslash
+# followed by 's', which matches nothing — `vector validate` still passes,
+# because it is a syntactically valid regex that simply never matches.
+# tests/run-tests.sh asserts these patterns match a real stack frame.
 [sources.pm2_logs.multiline]
 mode = "continue_through"
-start_pattern = '^(?:[A-Za-z_$][\\w$]*(?:Error|Exception)\\b|Error:)'
-condition_pattern = '^\\s+at\\s|^\\s*at\\s|^\\s*\\^+\\s*$|^\\s*(?:[A-Za-z_$][\\w$]*(?:Error|Exception)\\b|Error:)|^\\s+\\{|^\\s+\\[|^\\s+code:'
+# start_pattern MUST match every ordinary log line, or those lines never begin a
+# record. With `continue_through`, a line that matches neither pattern is
+# swallowed as a continuation and buffered until timeout, so an
+# exception-only start_pattern silently drops ALL normal logging. Verified on
+# 0.59.0: exception-only start_pattern emitted 0 events from a normal log file.
+start_pattern = '^'
+# Continuation lines: stack frames, the ^^^^^ caret, and the bracketed detail
+# blocks Node prints after a throw.
+condition_pattern = '^\s+at\s|^\s*at\s|^\s*\^+\s*$|^\s*(?:[A-Za-z_$][\w$]*(?:Error|Exception)\b|Error:)|^\s+\{|^\s+\[|^\s+code:|^\s{4,}\S'
 timeout_ms = 1000
 
 # ---------------------------------------------------------------------------
@@ -129,13 +150,21 @@ inputs = ["apply_tags"]
 #
 # NOTE: the axiom sink is BETA in Vector 0.59.0, with at-least-once delivery.
 # Duplicates are possible on retry. See references/vector-axiom-sink.md.
-dataset = "pm2-logs"
-
-# Placeholder only. pm2-logs-agent never writes a real token into the repo,
-# and the skill requires the token to be supplied via the env file. Replace
-# this by running render-vector-config.sh, which wires the sink to read
-# AXIOM_TOKEN and AXIOM_DATASET from the env file at runtime.
-token = "REPLACE_AT_INSTALL_TIME"
+#
+# Dataset and token are interpolated from the environment at config-load time.
+# This REQUIRES --dangerously-allow-env-var-interpolation, which the systemd
+# unit supplies via VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true. The
+# sink's token field is a config value, not a VRL expression, so a runtime
+# get_env_var() is not an option here — this is the one place the flag is
+# genuinely needed. See references/risk-tiers.md.
+#
+# The flag is also what makes a missing token FAIL FAST: with
+# VECTOR_STRICT_ENV_VARS=true (the default) an unset variable aborts config
+# load instead of sending a literal $${SECRET_AXIOM_TOKEN} as the token and
+# 401ing every batch. scripts/smoke-test.sh runs the pipeline before the unit
+# is enabled so that surfaces as a clear message rather than a restart loop.
+dataset = "${AXIOM_DATASET}"
+token = "${SECRET_AXIOM_TOKEN}"
 
 # org_id is required ONLY for personal tokens. Leave unset for
 # service-account tokens.

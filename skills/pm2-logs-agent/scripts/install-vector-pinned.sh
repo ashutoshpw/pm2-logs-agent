@@ -135,8 +135,13 @@ else
   BIN_DIR="/usr/bin"
   printf 'Installing to %s/vector...\n' "$BIN_DIR"
   tar -xzf "$TMP/$ASSET" -C "$TMP"
-  install -m 0755 "$TMP/vector-${V}-${TARBALL_ARCH}-${LIBC}/vector" "$BIN_DIR/vector" \
-    || die 3 "could not install binary to $BIN_DIR"
+  # The tarball's top-level directory is NOT version-prefixed. Verified for
+  # 0.59.0: it extracts to ./vector-x86_64-unknown-linux-gnu/bin/vector, not
+  # ./vector-0.59.0-x86_64-unknown-linux-gnu/vector. Locating the binary by
+  # pattern rather than by a constructed path avoids that whole class of bug.
+  VBIN="$(find "$TMP" -type f -name vector -perm -u+x 2>/dev/null | head -1)"
+  [ -n "$VBIN" ] || die 3 "could not find the vector binary inside $ASSET"
+  install -m 0755 "$VBIN" "$BIN_DIR/vector" || die 3 "could not install binary to $BIN_DIR"
 fi
 
 INSTALLED="$(vector --version 2>/dev/null | awk '{print $2}' | tr -d 'v')"

@@ -16,7 +16,22 @@ EnvironmentFile=/etc/vector/pm2-axiom.env
 # healthcheck, so systemd surfaces a broken pipeline instead of leaving a
 # silently degraded process running. Combine with Restart=always and
 # RestartSec for a retry loop rather than a one-shot failure.
-ExecStart=/usr/bin/vector --config /etc/vector/pm2-axiom.toml --require-healthy
+# --require-healthy takes an explicit boolean value. Bare `--require-healthy`
+# immediately followed by the next argument makes Vector fail to parse its own
+# command line, so the service never starts.
+ExecStart=/usr/bin/vector --config /etc/vector/pm2-axiom.toml --config /etc/vector/host-insights.toml --require-healthy true
+
+# The axiom sink's dataset and token are config-level ${VAR} interpolations,
+# which Vector disables unless this is set. VECTOR_STRICT_ENV_VARS defaults to
+# true, so a missing SECRET_AXIOM_TOKEN aborts config load instead of sending a
+# literal placeholder and 401ing every batch. Run scripts/smoke-test.sh BEFORE
+# enabling this unit so that failure appears as a clear message rather than a
+# restart loop.
+#
+# This flag exists because a templated field can otherwise be influenced by a
+# log producer; the token and dataset here are operator-controlled, so the
+# exposure is limited. See references/risk-tiers.md.
+Environment=VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true
 
 # Reloads the config on SIGHUP, matching Vector's graceful reload behaviour.
 ExecReload=/bin/kill -HUP $MAINPID

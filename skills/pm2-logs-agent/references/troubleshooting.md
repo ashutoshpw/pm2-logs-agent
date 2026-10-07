@@ -135,7 +135,7 @@ Prefer a service-account token; then `org_id` is not needed.
 ## Tags missing from events
 
 ```apl
-pm2-logs | where _time > ago(1h) and machine == "web-01" | limit 1
+pm2-service-logs | where _time > ago(1h) and machine == "web-01" | limit 1
 ```
 
 Empty means the tag did not land.

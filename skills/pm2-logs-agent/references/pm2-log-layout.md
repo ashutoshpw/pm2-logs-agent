@@ -149,24 +149,71 @@ Mitigations, in order of preference:
    strategies that reuse inodes.
 3. Avoid `copytruncate` entirely if logrotate can use rename+create.
 
-## Multi-line traces
+## Multi-line traces: two traps that both fail silently
 
-Without aggregation each `at ...` frame becomes its own Axiom row.
+**TOML single quotes are literal.** Backslashes are not escapes there, so every
+regex metacharacter class needs ONE backslash. Writing `\s` delivers a literal
+backslash-then-s to the regex engine, which matches nothing.
+
+`vector validate` passes either way, because `\s` is a syntactically valid regex
+that simply never matches. Only a behavioural test catches this.
+
+**`start_pattern` must match ordinary log lines.** With
+`mode = "continue_through"`, a line matching neither `start_pattern` nor
+`condition_pattern` is swallowed as a continuation and buffered until the
+timeout. So an exception-only start pattern — the intuitive choice — silently
+drops ALL normal logging.
+
+Measured on 0.59.0: a normal log file with an exception-only `start_pattern`
+produced **0 events**. The working shape:
 
 ```toml
 [sources.pm2_logs.multiline]
 mode = "continue_through"
-start_pattern = '^(?:[A-Za-z_$][\w$]*(?:Error|Exception)\b|Error:)'
-condition_pattern = '^\s+at\s|^\s*at\s|^\s*\^+\s*$|^\s*(?:[A-Za-z_$][\w$]*(?:Error|Exception)\b|Error:)'
+start_pattern = '^'                                  # every line can begin a record
+condition_pattern = '^\s+at\s|^\s*\^+\s*$|^\s*(?:[A-Za-z_$][\w$]*(?:Error|Exception)\b|Error:)'
 timeout_ms = 1000
 ```
 
-`mode` is **required** alongside `condition_pattern` on 0.59.0, as is
-`start_pattern`. This is the one genuinely app-specific part of the pipeline —
-Java and Python tracebacks need different patterns.
+`start_pattern = '^'` matches everything, so `condition_pattern` alone decides
+what gets folded in. Verify with `vector vrl` against a real frame, not by
+inspection.
+
+## Multi-line traces
+
+Without aggregation each `at ...` frame becomes its own Axiom row. `mode` is
+required alongside both `condition_pattern` and `start_pattern` on 0.59.0. This
+is the one genuinely app-specific part of the pipeline — Java and Python
+tracebacks need different `condition_pattern` values.
+
+The pattern set actually shipped is in `assets/vector.toml`; see the section
+above for the two traps that make a plausible-looking pattern ingest nothing.
 
 `timeout_ms` bounds how long Vector waits for a continuation line. Too low splits
 traces; too high delays the first line of the next event.
+
+## Rotation filenames and what gets re-uploaded
+
+`pm2-logrotate` appends `dateFormat` (default `YYYY-MM-DD_HH-mm-ss`):
+
+```
+api-out-0.log                            live
+api-out-0.log-2026-10-07_12-00-00        rotated
+api-out-0.log-2026-10-07_12-00-00.gz    rotated + compressed
+```
+
+**The rotated name matches `*.log`.** An `include` of `*.log` with only
+`exclude = ["*.log.*.gz"]` therefore re-uploads every rotated, uncompressed file
+— once per run, forever, and again after any restart that loses its checkpoint.
+
+The exclude list needs both forms:
+
+```toml
+exclude = [
+  "/home/deploy/.pm2/logs/*.log-*.gz",
+  "/home/deploy/.pm2/logs/*.log.*.gz",
+]
+```
 
 ## Glob syntax
 

@@ -151,7 +151,7 @@ is not self-healing.
 Per-disk rows need `mv-expand`, which expands dynamic arrays into rows:
 
 ```apl
-pm2-host-insights | where _time > ago(6h) | mv-expand disks
+pm2-service-logs (kind == "host_insights") | where _time > ago(6h) | mv-expand disks
   | project _time, machine, disks.mount, disks.used_pct
   | where disks.used_pct > 80
 ```
@@ -159,7 +159,7 @@ pm2-host-insights | where _time > ago(6h) | mv-expand disks
 ### Cadence
 
 ```apl
-pm2-host-insights | where _time > ago(3h)
+pm2-service-logs (kind == "host_insights") | where _time > ago(3h)
   | summarize ticks = count(), first = min(_time), last = max(_time)
 ```
 
@@ -170,7 +170,7 @@ interval, and the skill does not claim either.
 ### Dead heartbeat
 
 ```apl
-pm2-host-insights | summarize last = arg_max(_time, _time) | where last < ago(45m)
+pm2-service-logs (kind == "host_insights") | summarize last = arg_max(_time, _time) | where last < ago(45m)
 ```
 
 Must return **empty** when healthy. Recommended as an Axiom monitor: 45m gives
@@ -179,7 +179,7 @@ margin over the 30m interval.
 ### Partial reads
 
 ```apl
-pm2-host-insights | where _time > ago(6h) and disk_coverage.failed > 0
+pm2-service-logs (kind == "host_insights") | where _time > ago(6h) and disk_coverage.failed > 0
   | project _time, machine, disk_coverage
 ```
 

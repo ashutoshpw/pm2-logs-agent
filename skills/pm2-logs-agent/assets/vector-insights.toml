@@ -21,11 +21,25 @@
 #                             snapshot into `message` and make every field
 #                             unqueryable.
 #
-# Generated copy: run render-vector-config.sh --insights, or copy this file and
-# adjust the command path.
-
-data_dir = "/var/lib/vector"
-
+# ===========================================================================
+# MERGING
+# ===========================================================================
+#
+# This file is loaded ALONGSIDE assets/vector.toml by ONE Vector process:
+#
+#   ExecStart=/usr/bin/vector \
+#     --config /etc/vector/pm2-axiom.toml \
+#     --config /etc/vector/host-insights.toml \
+#     --require-healthy true
+#
+# Component ids share a namespace across merged configs, so ids here must not
+# collide with the log config's. The log config owns:
+#     sources.pm2_logs, transforms.parse_app, transforms.apply_tags,
+#     sinks.axiom
+# Hence the tag transform here is `apply_tags_insights`, and there is NO
+# data_dir below — it is a global option already set by the log config, and
+# repeating it is a duplicate-key error.
+#
 # ---------------------------------------------------------------------------
 # source
 # ---------------------------------------------------------------------------
@@ -33,6 +47,9 @@ data_dir = "/var/lib/vector"
 [sources.host_insights]
 type = "exec"
 mode = "scheduled"
+
+# Installed by scripts/install.sh. This path is NOT created by
+# install-vector-pinned.sh, which only installs the Vector binary.
 command = ["/opt/pm2-logs-agent/host-insights.sh"]
 
 # MANDATORY false. See the note at the top of this file.
@@ -50,7 +67,11 @@ decoding.codec = "json"
 
 # Reuses the SAME tag mechanism as the log pipeline, so machine / public_ip /
 # tailscale_ip are attached to insights rows too.
-[transforms.apply_tags]
+#
+# Transform id is `apply_tags_insights`, NOT `apply_tags`: component ids share a
+# namespace when configs are merged, and the log config already owns
+# `apply_tags`. A collision makes Vector reject the merged config outright.
+[transforms.apply_tags_insights]
 type = "remap"
 inputs = ["host_insights"]
 source = '''
@@ -65,16 +86,20 @@ placeholder
 
 [sinks.axiom_insights]
 type = "axiom"
-inputs = ["apply_tags"]
+inputs = ["apply_tags_insights"]
 
-dataset = "pm2-host-insights"
+# Same dataset as the log pipeline by default. Every insight event carries
+# kind = "host_insights", so queries filter rather than cross-reference
+# datasets. render-vector-config.sh --insights-dataset overrides this.
+dataset = "${AXIOM_DATASET}"
 
 # region is OPTIONAL; see assets/vector.toml for the rationale. Omitted here
 # means Axiom's default base domain is used.
 # region = "us-east-1.aws.edge.axiom.co"
 
-# Placeholder. The real token comes from the env file at runtime.
-token = "REPLACE_AT_INSTALL_TIME"
+# Config-level interpolation, same as the log sink. Requires the systemd unit's
+# VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true.
+token = "${SECRET_AXIOM_TOKEN}"
 
 compression = "zstd"
 batch.timeout_secs = 5

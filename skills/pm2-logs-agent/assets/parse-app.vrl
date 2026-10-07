@@ -20,6 +20,11 @@
 # /var/log/my-app/api-out-3.log yields app="api", not the whole directory
 # chain. Still greedy on dashes, so "my-out-app-out-5.log" resolves to
 # app="my-out-app".
+# Discriminator field. Lets one dataset hold both logs and host insights, so a
+# query filters with `where kind == "pm2_log"` instead of cross-referencing two
+# datasets. The insights script emits kind = "host_insights".
+.kind = "pm2_log"
+
 parsed, err = parse_regex(string(.file) ?? "", r'(?P<app>[^/]*)-(?P<stream>out|error)(?:-(?P<pid>\d+))?\.log$')
 
 if err == null && is_object(parsed) {
@@ -28,7 +33,8 @@ if err == null && is_object(parsed) {
   .severity = if parsed.stream == "error" { "error" } else { "info" }
   .pm2_pid = parsed.pid
 } else {
-  # Covers $PM2_HOME/pm2.log and any log file PM2 wrote with a custom path we
+  # Covers the PM2 daemon log (pm2.log, which sits outside logs/) and any log
+  # file PM2 wrote with a custom path we
   # could not pattern-match. Still labelled, never dropped.
   .app = "pm2-daemon"
   .stream = "PM2"

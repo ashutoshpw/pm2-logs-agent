@@ -163,7 +163,10 @@ if command -v pm2 >/dev/null 2>&1; then
   if pm2 ping >/dev/null 2>&1; then PM2_DAEMON_ALIVE="true"; fi
   if [ "$PM2_DAEMON_ALIVE" = "true" ]; then
     PM2_JLIST="$(pm2 jlist 2>/dev/null || echo '[]')"
-    APPS_JSON="$(printf '%s' "$PM2_JLIST" | jq -c '[.[] | {name, pm_id, status:(.pm2_env.status // "unknown"), out_file:(.pm2_env.pm_out_log_path // ""), error_file:(.pm2_env.pm_err_log_path // ""), log_type:(.pm2_env.log_type // "raw"), merge_logs:(.pm2_env.merge_logs // false), instances:(.pm2_env.instances // 1)}]' 2>/dev/null || echo '[]')"
+    # unstable_restarts and restart_time come from pm2_env. A high unstable
+    # count means PM2 has been killing and restarting the process repeatedly,
+    # which looks like a logging gap but is actually an application crash loop.
+    APPS_JSON="$(printf '%s' "$PM2_JLIST" | jq -c '[.[] | {name, pm_id, status:(.pm2_env.status // "unknown"), out_file:(.pm2_env.pm_out_log_path // ""), error_file:(.pm2_env.pm_err_log_path // ""), log_type:(.pm2_env.log_type // "raw"), merge_logs:(.pm2_env.merge_logs // false), instances:(.pm2_env.instances // 1), unstable_restarts:(.pm2_env.unstable_restarts // 0), restart_time:(.pm2_env.restart_time // null), pm_uptime:(.pm2_env.pm_uptime // null), exec_mode:(.pm2_env.exec_mode // "fork")}]' 2>/dev/null || echo '[]')"
     LIVE_APP_COUNT="$(printf '%s' "$APPS_JSON" | jq 'length' 2>/dev/null || echo 0)"
   fi
 fi
@@ -185,6 +188,17 @@ if [ "$LIVE_APP_COUNT" -gt 0 ] 2>/dev/null; then
     add_finding "pm2.apps.errored" "high" "Apps in errored state" \
       "$ERRORED_COUNT app(s) are in errored status. These are not producing healthy logs, which can look like a logging pipeline failure when it is actually an application failure. Check with: pm2 logs <name>" \
       "$(printf '%s' "$ERRORED_APPS")"
+  fi
+
+  # Restart loops. The log files keep growing across restarts so the pipeline
+  # looks healthy, but the app never stays up — worth surfacing so a "no
+  # recent logs" question is answered by the right cause.
+  LOOPING="$(printf '%s' "$APPS_JSON" | jq -c '[.[] | select((.unstable_restarts // 0) >= 5) | {name, unstable_restarts}]' 2>/dev/null || echo '[]')"
+  LOOP_COUNT="$(printf '%s' "$LOOPING" | jq 'length' 2>/dev/null || echo 0)"
+  if [ "$LOOP_COUNT" -gt 0 ]; then
+    add_finding "pm2.apps.restart_loop" "high" "Apps are restart-looping" \
+      "$LOOP_COUNT app(s) have 5 or more unstable restarts. Their log files are being written and rotated normally, so the logging pipeline looks healthy, but the app is not staying up. PM2's unstable-restart threshold is 16 within 15 minutes. Check with: pm2 logs <name>" \
+      "$(printf '%s' "$LOOPING")"
   fi
 fi
 
@@ -386,8 +400,47 @@ fi
 
 COLLECTORS_JSON="[]"
 COLL=""
+# Enumerate collector UNITS, not binaries.
+#
+# `command -v vector` plus `systemctl is-enabled vector` conflates unrelated
+# things: a host can run vector.service from a hand-installed binary under
+# ~/.vector for Docker logs, which has nothing to do with PM2, and the audit
+# then reports a collector that this skill does not control as "enabled at
+# boot". Read each unit's ExecStart and config path so every collector is
+# attributed correctly.
+COLLECTOR_UNITS="[]"
+VECTOR_MANAGED_UNIT=""
+VECTOR_MANAGED_ENABLED="unknown"
+if command -v systemctl >/dev/null 2>&1; then
+  UNITS="$(systemctl list-unit-files --no-legend --no-pager 2>/dev/null \
+            | awk '$1 ~ /(vector|fluent-bit|filebeat|logstash|promtail|rsyslog)/ {print $1}' \
+            | grep -vE '^$|\.service$|^/' )"
+  [ -n "$UNITS" ] && UNITS="$(printf '%s\n' "$UNITS" | grep '\.service$' || true)"
+  for u in $UNITS; do
+    es="$(systemctl show "$u" --property=ExecStart --value 2>/dev/null | head -c 400)"
+    bin="$(printf '%s' "$es" | grep -oE '[^ ;]*/vector([[:space:]]|$)' | head -1 | sed 's/[[:space:]]*$//')"
+    ver="unknown"; [ -n "$bin" ] && [ -x "$bin" ] && ver="$("$bin" --version 2>/dev/null | awk '{print $2}' | tr -d 'v')"
+    cfgs="$(systemctl show "$u" --property=ExecStart --value 2>/dev/null | grep -oE '\-\-config[= ][^ ;]*' | sed 's/--config[= ]*//' | tr '\n' ',')"
+    en=false; systemctl is-enabled "$u" >/dev/null 2>&1 && en=true
+    ac=false; systemctl is-active "$u" >/dev/null 2>&1 && ac=true
+    ent=$(printf '{"unit":%s,"binary":%s,"version":%s,"config_paths":%s,"enabled":%s,"active":%s}' \
+      "$(json_str "$u")" "$(json_str "$bin")" "$(json_str "$ver")" \
+      "$(if [ -n "$cfgs" ]; then printf '["%s"]' "$(printf '%s' "$cfgs" | sed 's/,$//')"; else printf 'null'; fi)" \
+      "$en" "$ac")
+    if [ -z "$COLLECTOR_UNITS" ] || [ "$COLLECTOR_UNITS" = "[]" ]; then
+      COLLECTOR_UNITS="[$ent]"
+    else
+      COLLECTOR_UNITS="${COLLECTOR_UNITS%\]}],[$ent]"
+    fi
+    # The unit this skill owns is the one running OUR config path.
+    case "$cfgs" in
+      */pm2-axiom.toml*|*host-insights.toml*) VECTOR_MANAGED_UNIT="$u"; VECTOR_MANAGED_ENABLED="$en" ;;
+    esac
+  done
+fi
+
 if [ "$VECTOR_INSTALLED" = "true" ]; then
-  COLL="$COLL{\"name\":\"vector\",\"version\":\"$VECTOR_VERSION_DETECTED\",\"unit_enabled\":$(if systemctl is-enabled vector >/dev/null 2>&1; then echo true; else echo false; fi),\"config_reads_pm2_logs\":false}"
+  COLL="$COLL{\"name\":\"vector-binary\",\"version\":\"$VECTOR_VERSION_DETECTED\",\"managed_unit\":$(json_str "$VECTOR_MANAGED_UNIT")}"
 fi
 for agent in fluent-bit filebeat logstash prometheus; do
   if command -v "$agent" >/dev/null 2>&1 || systemctl list-unit-files "${agent}.service" >/dev/null 2>&1; then
@@ -404,26 +457,57 @@ fi
 VECTOR_CONFIGS_FOUND="[]"
 VECTOR_CFG_COUNT=0
 if [ -d /etc/vector ]; then
-  VECTOR_CFG_COUNT="$(find /etc/vector -maxdepth 2 -type f \( -name '*.toml' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) 2>/dev/null | wc -l | tr -d ' ')"
-  VECTOR_CONFIGS_FOUND="$(find /etc/vector -maxdepth 2 -type f \( -name '*.toml' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) 2>/dev/null | sed 's/^/"/;s/$/"/' | paste -sd, - || true)"
-  [ -z "$VECTOR_CONFIGS_FOUND" ] && VECTOR_CONFIGS_FOUND="null"
-  VECTOR_CONFIGS_FOUND="[$VECTOR_CONFIGS_FOUND]"
+  # Skip non-config directories. The Vector deb package ships
+  # /etc/vector/examples/, and a bare find counted all of those as "configs",
+  # overstating how many collectors exist. Also skip editor backups.
+  VECTOR_CFG_PATHS="$(find /etc/vector -maxdepth 2 \
+      \( -path '*/examples' -o -path '*/examples/*' -o -path '*/.git' -o -path '*/backup*' \) -prune -o \
+      -type f \( -name '*.toml' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) \
+      ! -name '*.bak' ! -name '*~' ! -name '*.orig' -print 2>/dev/null | sort)"
+  VECTOR_CFG_COUNT="$(printf '%s' "$VECTOR_CFG_PATHS" | grep -c . || true)"
+  [ -z "$VECTOR_CFG_COUNT" ] && VECTOR_CFG_COUNT=0
+  VECTOR_CONFIGS_FOUND="null"
+  [ "$VECTOR_CFG_COUNT" -gt 0 ] && VECTOR_CONFIGS_FOUND="[$(printf '%s\n' "$VECTOR_CFG_PATHS" | sed 's/^/"/;s/$/"/' | paste -sd, -)]"
 
-  # Does any existing Vector config already read PM2 logs? Adding a second
-  # source over the same files means duplicate ingest and double cost.
-  if grep -rls '\.pm2/logs' /etc/vector 2>/dev/null | grep -q .; then
-    MATCHING="$(grep -rls '\.pm2/logs' /etc/vector 2>/dev/null | sed 's/^/"/;s/$/"/' | paste -sd, -)"
-    add_finding "collectors.duplicate_ingest" "critical" "An existing Vector config already reads PM2 logs" \
-      "Found PM2 log references in: $MATCHING. Adding a second pipeline over the same files will ingest every event twice and double the Axiom cost. Either extend the existing config or exclude these paths from the new one. This is a CHANGE tier action requiring review." \
+  # Does an existing config already read PM2 logs? Adding a second pipeline over
+  # the same files means duplicate ingest and double cost.
+  #
+  # A config this skill generated is skipped: after install, the audit would
+  # otherwise report the skill's own config as a third-party conflict, which is
+  # a guaranteed false positive on every subsequent run.
+  FOREIGN="$(printf '%s\n' "$VECTOR_CFG_PATHS" | grep . | while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                grep -q 'managed-by: pm2-logs-agent' "$f" 2>/dev/null && continue
+                grep -l '\.pm2/logs' "$f" 2>/dev/null
+              done)"
+  if [ -n "$FOREIGN" ]; then
+    MATCHING="$(printf '%s\n' "$FOREIGN" | sed 's/^/"/;s/$/"/' | paste -sd, -)"
+    add_finding "collectors.duplicate_ingest" "critical" "Another Vector config already reads PM2 logs" \
+      "Found PM2 log references in: $MATCHING. These are not managed by pm2-logs-agent. Adding a second pipeline over the same files will ingest every event twice and double the Axiom cost. Either extend that config or exclude these paths from the new one. This is a CHANGE tier action requiring review." \
       "$(ev_list "files=$MATCHING")"
+  elif [ "$VECTOR_CFG_COUNT" -gt 0 ] && printf '%s\n' "$VECTOR_CFG_PATHS" | grep . \
+        | xargs -r grep -l 'managed-by: pm2-logs-agent' 2>/dev/null | grep -q .; then
+    add_finding "collectors.managed_config_present" "info" "pm2-logs-agent config found" \
+      "Existing config(s) managed by pm2-logs-agent were found and skipped in the duplicate-ingest check. Re-run the audit after a config change to re-verify." \
+      "$(ev_list "count=$VECTOR_CFG_COUNT")"
   fi
 fi
 
-# Does the existing Vector unit survive a reboot? This is half of the 2x2
-# matrix that produces the two silent-blackout scenarios.
+# Does OUR collector survive a reboot? This is half of the 2x2 matrix that
+# produces the two silent-blackout scenarios.
+#
+# Scoped to the unit that runs our config path, not to any unit named
+# "vector.service": an unrelated vector.service shipping Docker logs must not be
+# counted as evidence that PM2 logs will survive a reboot.
 VECTOR_ENABLED="false"
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl is-enabled vector >/dev/null 2>&1 && VECTOR_ENABLED="true"
+[ "$VECTOR_MANAGED_UNIT" != "" ] && [ "$VECTOR_MANAGED_ENABLED" = "true" ] && VECTOR_ENABLED="true"
+
+if [ "$VECTOR_INSTALLED" = "true" ] && [ "$VECTOR_MANAGED_UNIT" = "" ]; then
+  OTHER_V="$(printf '%s' "$COLLECTOR_UNITS" | jq -r '[.[] | select(.binary != null and .binary != "")] | length' 2>/dev/null || echo 0)"
+  [ "${OTHER_V:-0}" -gt 0 ] 2>/dev/null && add_finding "collectors.unrelated_vector" "medium" \
+    "A Vector collector exists but it is not managed by pm2-logs-agent" \
+    "Found $OTHER_V vector unit(s) running different config paths. None of them read PM2 logs for this skill, so PM2 logs will NOT survive a reboot even though a collector is enabled. Either extend that unit or install a dedicated one for this pipeline." \
+    "$(ev_list "units=$(printf '%s' "$COLLECTOR_UNITS" | jq -c '[.[].unit] // []' 2>/dev/null)")"
 fi
 
 if [ "$PM2_UNIT_PRESENT" = "true" ] && [ "$PM2_UNIT_ENABLED" = "true" ] && [ "$VECTOR_INSTALLED" = "true" ] && [ "$VECTOR_ENABLED" = "false" ]; then
@@ -434,6 +518,94 @@ elif [ "$PM2_UNIT_PRESENT" != "true" ] && [ "$VECTOR_INSTALLED" = "true" ] && [ 
   add_finding "restart.matrix.pipeline_idle" "high" "Collector survives reboot but PM2 does not — healthy pipeline, zero data" \
   "Vector is enabled at boot but PM2 has no enabled unit. After a reboot the collector starts, reports healthy, and receives nothing because no apps are running. This looks fine in every dashboard. Fix: pm2 startup && pm2 save (RISKY tier)." \
   "[\"pm2_unit_present=false\",\"vector_enabled=true\"]"
+fi
+
+# ===========================================================================
+# can the collector actually READ these files?
+# ===========================================================================
+#
+# The most consequential unverified assumption in this whole audit. If the
+# Vector service user lacks execute permission on the parent directories or read
+# permission on the files, Vector starts cleanly, reports healthy, and ingests
+# nothing. Nothing in `systemctl status` says so.
+#
+# `sudo -u <user> test -r` is the honest test, so use it when available. When
+# not (no sudo, or already unprivileged) say "unknown" rather than guessing.
+
+READABLE_UNREADABLE="[]"
+PERM_METHOD="none"
+UNREADABLE_COUNT=0
+
+# Which user does Vector run as?
+VECTOR_RUN_USER=""
+for u in vector _vector; do
+  id "$u" >/dev/null 2>&1 && { VECTOR_RUN_USER="$u"; break; }
+done
+
+if [ "$VECTOR_RUN_USER" != "" ]; then
+  if [ "$(id -un)" = "$VECTOR_RUN_USER" ]; then
+    PERM_METHOD="direct"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    PERM_METHOD="sudo"
+  fi
+fi
+
+if [ "$PERM_METHOD" != "none" ]; then
+  READABLE_UNREADABLE="$(printf '%s' "$LOGS_JSON" | jq -c '.[]' 2>/dev/null | while IFS= read -r a; do
+    [ -z "$a" ] && continue
+    for key in out_file error_file; do
+      p="$(printf '%s' "$a" | jq -r ".$key")"
+      [ -z "$p" ] || [ "$p" = "/dev/null" ] && continue
+      [ -f "$p" ] || continue
+      if [ "$PERM_METHOD" = "direct" ]; then
+        [ -r "$p" ] && verdict=readable || verdict=unreadable
+      else
+        if sudo -n -u "$VECTOR_RUN_USER" test -r "$p" >/dev/null 2>&1; then verdict=readable
+        elif sudo -n -u "$VECTOR_RUN_USER" test -r "$p" >/dev/null 2>&1; then verdict=denied
+        else verdict=absent; fi
+      fi
+      printf '%s\n' "$a" | jq -c --argjson v "$verdict" --arg k "$key" --arg p "$p" \
+        '. + {($k + "_readable"): $v, ($k + "_path_checked"): $p}'
+    done
+  done | jq -sc '.' 2>/dev/null || echo '[]')"
+  # Fold the verdicts back into per_app.
+  if [ "$(printf '%s' "$READABLE_UNREADABLE" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]; then
+    LOGS_JSON="$(jq -n --argjson base "$LOGS_JSON" --argjson res "$READABLE_UNREADABLE" '
+      [ $base[] as $b
+        | ($res | map(select(.name == $b.name)) | .[0] // {}) as $r
+        | $b + ($r | del(.name, .out_file, .error_file)) ]' 2>/dev/null || echo '[]')"
+  fi
+  UNREADABLE_LIST="$(printf '%s' "$LOGS_JSON" | jq -c '[.[] | select(.out_readable == "unreadable" or .out_readable == "denied" or .error_readable == "unreadable" or .error_readable == "denied") | .name]' 2>/dev/null || echo '[]')"
+  UNREADABLE_COUNT="$(printf '%s' "$UNREADABLE_LIST" | jq 'length' 2>/dev/null || echo 0)"
+  if [ "$UNREADABLE_COUNT" -gt 0 ]; then
+    add_finding "logs.unreadable_by_collector" "critical" "The collector cannot read some log files" \
+      "Tested as user '$VECTOR_RUN_USER': $UNREADABLE_COUNT app(s) have log files the Vector service cannot read. Vector will start, report healthy, and ingest NOTHING from them. Fix with a group or ACL: usermod -aG <pm2-user> $VECTOR_RUN_USER, or setfacl -R -m u:$VECTOR_RUN_USER:rX <log-dir> (CHANGE tier)." \
+      "$(ev_list "apps=$(printf '%s' "$UNREADABLE_LIST" | jq -r 'join(", ")')" "tested_as=$VECTOR_RUN_USER")"
+  fi
+else
+  # No way to test. Report the files so a human can check, rather than implying
+  # access is fine.
+  add_finding "logs.readability_unknown" "medium" "Cannot verify the collector can read the log files" \
+    "The Vector service user '$VECTOR_RUN_USER' could not be tested (needs sudo, or run as that user). Vector will ingest nothing from files it cannot read, and that failure is silent. Verify with: sudo -u $VECTOR_RUN_USER test -r <logfile>" \
+    "$(ev_list "vector_user=$VECTOR_RUN_USER")"
+fi
+
+# Files on disk that belong to no live app. Orphaned log files look like a
+# pipeline problem when the real cause is an app that was removed.
+ORPHAN_FILES=""
+if [ -d "$DEFAULT_LOG_DIR" ] && [ "$LIVE_APP_COUNT" -gt 0 ] 2>/dev/null && command -v jq >/dev/null 2>&1; then
+  KNOWN="$(printf '%s' "$APPS_JSON" | jq -r '[.[].out_file, .[].error_file] | .[]' 2>/dev/null | grep . || true)"
+  ALLF="$(find "$DEFAULT_LOG_DIR" -maxdepth 1 -name '*.log' 2>/dev/null | sort)"
+  ORPHAN_FILES="$(printf '%s\n' "$ALLF" | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    printf '%s\n' "$KNOWN" | grep -qxF "$f" || printf '%s\n' "$f"
+  done | paste -sd, - 2>/dev/null || true)"
+  ORPHAN_N="$(printf '%s' "$ORPHAN_FILES" | awk -F, 'NF>0{n++} END{print n+0}')"
+  if [ "${ORPHAN_N:-0}" -gt 0 ]; then
+    add_finding "logs.orphan_files" "low" "Log files with no matching running app" \
+      "$ORPHAN_N log file(s) in $DEFAULT_LOG_DIR belong to no currently running app: $ORPHAN_FILES. These are leftovers from removed apps, which Vector will still ingest. That is harmless but adds noise. Confirm they are genuinely orphaned before removing anything: pm2 flush deletes ALL log content (RISKY)." \
+      "$(ev_list "count=$ORPHAN_N" "files=$ORPHAN_FILES")"
+  fi
 fi
 
 # ===========================================================================
@@ -591,6 +763,9 @@ cat <<JSON
   },
   "collectors": {
     "vector_installed": $(json_bool "$VECTOR_INSTALLED"),
+    "managed_unit": $(json_str "${VECTOR_MANAGED_UNIT:-}"),
+    "managed_unit_enabled": $(json_str "${VECTOR_MANAGED_ENABLED:-unknown}"),
+    "collector_units": ${COLLECTOR_UNITS:-[]},
     "vector_version": $(json_str "$VECTOR_VERSION_DETECTED"),
     "vector_pinned_version": $(json_str "$PINNED_VERSION"),
     "vector_version_drift": $(json_str "$VECTOR_DRIFT"),

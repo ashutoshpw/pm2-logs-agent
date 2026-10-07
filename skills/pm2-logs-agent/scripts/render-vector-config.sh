@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
+# managed-by: pm2-logs-agent
+#
 # pm2-logs-agent — render a host-specific Vector config from the audit output
+#
+# That first line matters: scripts/audit-pm2-logs.sh looks for it to recognise
+# its own config and stop reporting the skill's own file as a third-party
+# collector reading the same PM2 logs. Without it every post-install audit
+# raises a false critical duplicate-ingest finding.
 #
 # WHY THIS SCRIPT EXISTS
 #
@@ -45,7 +52,11 @@ ASSETS_DIR="$REPO_DIR/assets"
 OUT=""
 PM2_HOME_DIR="${PM2_HOME:-$HOME/.pm2}"
 FIRST_RUN="no"
-DATASET="pm2-logs"
+DATASET="pm2-service-logs"
+# Insights default to the SAME dataset. Every event carries a `kind` field, so a
+# query filters rather than cross-referencing datasets. Pass
+# --insights-dataset to split them.
+INSIGHTS_DATASET=""
 # Empty means "do not write a region line at all". Vector then uses Axiom's
 # default base domain (api.axiom.co), which is right for most accounts.
 REGION=""
@@ -63,6 +74,7 @@ while [ $# -gt 0 ]; do
     --out)      OUT="${2:-}";      [ -n "$OUT" ] || die 1 "--out needs a path"; shift 2 ;;
     --pm2-home) PM2_HOME_DIR="${2:-}"; [ -n "$PM2_HOME_DIR" ] || die 1 "--pm2-home needs a path"; shift 2 ;;
     --log-glob) [ -n "${2:-}" ] || die 1 "--log-glob needs a pattern"; LOG_GLOBS+=("$2"); shift 2 ;;
+    --insights-dataset) [ -n "${2:-}" ] || die 1 "--insights-dataset needs a value"; INSIGHTS_DATASET="$2"; shift 2 ;;
     --first-run) FIRST_RUN="yes"; shift ;;
     --cutover)  FIRST_RUN="no"; shift ;;
     --dataset)  DATASET="${2:-}";  [ -n "$DATASET" ] || die 1 "--dataset needs a value"; shift 2 ;;
@@ -86,10 +98,13 @@ fi
 [ -f "$ASSETS_DIR/apply-tags.vrl" ] || die 2 "missing assets/apply-tags.vrl"
 
 # Axiom dataset names: 1-128 chars, ASCII alphanumeric plus hyphen only.
-case "$DATASET" in
-  *[!A-Za-z0-9-]*) die 1 "invalid dataset '$DATASET' (Axiom allows only A-Za-z0-9 and hyphen)" ;;
-esac
-[ "${#DATASET}" -le 128 ] || die 1 "dataset exceeds 128 characters"
+for d in "$DATASET" "$INSIGHTS_DATASET"; do
+  [ -n "$d" ] || continue
+  case "$d" in
+    *[!A-Za-z0-9-]*) die 1 "invalid dataset '$d' (Axiom allows only A-Za-z0-9 and hyphen)" ;;
+  esac
+  [ "${#d}" -le 128 ] || die 1 "dataset '$d' exceeds 128 characters"
+done
 
 # Axiom edge domain: bare domain, no scheme, no path, no trailing slash.
 case "$REGION" in
@@ -114,6 +129,7 @@ RENDER_REGION="$REGION" \
 RENDER_DATASET="$DATASET" \
 RENDER_FIRST_RUN="$FIRST_RUN" \
 RENDER_INSIGHTS="$INSIGHTS" \
+RENDER_INSIGHTS_DATASET="$INSIGHTS_DATASET" \
 RENDER_DEST="$TMP_OUT" \
 python3 - <<'PY'
 import os, pathlib, re, sys
@@ -126,6 +142,9 @@ region    = os.environ["RENDER_REGION"]
 dataset   = os.environ["RENDER_DATASET"]
 first_run = os.environ["RENDER_FIRST_RUN"] == "yes"
 insights = os.environ["RENDER_INSIGHTS"] == "yes"
+insights_dataset = os.environ.get("RENDER_INSIGHTS_DATASET", "")
+
+DEFAULT_DATASET = "pm2-service-logs"
 
 # The insights pipeline has no read_from / ignore_older_secs / include /
 # exclude keys — those belong to the file source only. Substituting them there
@@ -154,6 +173,12 @@ if not globs:
     die("no include globs supplied")
 
 out = template.read_text()
+
+# Stamp the rendered config as ours so the audit does not flag the skill's own
+# file as a third-party collector reading the same PM2 logs.
+if "managed-by: pm2-logs-agent" not in out:
+    out = re.sub(r'^(# pm2-logs-agent)',
+                 r'# managed-by: pm2-logs-agent\n\1', out, count=1, flags=re.M)
 
 for name, label in (("parse-app.vrl", "parse-app.vrl"),
                     ("apply-tags.vrl", "apply-tags.vrl")):
@@ -190,7 +215,15 @@ if region:
     else:
         out = sub1(r'^(dataset = .*)$',
                    lambda m: f'region = "{region}"\n{m.group(1)}', out, "region insert", re.M)
-out = sub1(r'^dataset = .*$', f'dataset = "{dataset}"', out, "dataset", re.M)
+if insights:
+    # The insights template ships `dataset = "${AXIOM_DATASET}"`, so the env
+    # file drives it and no substitution is needed. Only write a literal when
+    # the caller explicitly asked for a separate insights dataset.
+    if insights_dataset:
+        out = sub1(r'^dataset = .*$',
+                   f'dataset = "{insights_dataset}"', out, "insights dataset", re.M)
+else:
+    out = sub1(r'^dataset = .*$', f'dataset = "{dataset}"', out, "dataset", re.M)
 
 if not insights:
     glob_lines = "".join(f'  "{g}",\n' for g in globs).rstrip(",\n")
@@ -199,11 +232,19 @@ if not insights:
 
     # The exclude block is tied to the example PM2_HOME; regenerate it so it
     # tracks whatever globs we were given.
-    exclude_glob = os.path.join(
-        next((g.rsplit("/", 1)[0] for g in globs if g.endswith("*.log")), "/nonexistent"),
-        "*.log.*.gz")
+    #
+    # TWO patterns are required, not one. pm2-logrotate appends its dateFormat
+    # (default YYYY-MM-DD_HH-mm-ss), so a rotated file is
+    # api-out-0.log-2026-10-07_12-00-00 — which MATCHES the `*.log` include
+    # glob. Only excluding `*.gz` lets every rotated file be re-uploaded, once
+    # per run, forever.
+    logdir = next((g.rsplit("/", 1)[0] for g in globs if g.endswith("*.log")), "/nonexistent")
     out = sub1(r'^exclude = \[\n.*?\n\]',
-               f'exclude = [\n  "{exclude_glob}",\n]', out, "exclude globs", re.S | re.M)
+               'exclude = [\n'
+               f'  "{logdir}/*.log-*.gz",\n'
+               f'  "{logdir}/*.log.*.gz",\n'
+               ']',
+               out, "exclude globs", re.S | re.M)
 
 dest.write_text(out)
 PY

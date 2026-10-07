@@ -8,7 +8,7 @@ description: >-
   logs", "ship pm2 logs to axiom", "will my apps restart after a reboot", "pm2 save", "pm2 startup",
   "where are my pm2 logs", or "set up pm2 log forwarding". Attaches a mandatory machine tag plus
   optional public-IPv4 and Tailscale-IP tags, and reports server-wide CPU, RAM and per-disk usage
-  every 30 minutes. Never changes production state without explicit per-action approval.
+  every 30 minutes. Default dataset is pm2-service-logs for both streams, validated by writing one probe record. Never changes production state without explicit per-action approval.
 license: MIT
 metadata:
   version: 1.0.0
@@ -55,8 +55,10 @@ Approval is per tier. Approving tier N never implies N+1.
 | **CHANGE** | Alters runtime behaviour, needs a service start/restart | `systemctl enable --now vector`; editing an *existing* Vector config; adding a second `file` source; Vector upgrade | per action, show the diff |
 | **RISKY** | Can cause an outage or lose data | `pm2 save` when the dump is a superset; `pm2 startup`; `pm2 unstartup`; `pm2 restart`/`reload` any app; changing `out_file`/`error_file`; `pm2 flush`; deleting rotated logs | **always** explicit yes, restate the blast radius, suggest a window |
 
-**RISKY actions are never executed by the skill.** Generate the command, explain the
-consequence, let the human run it.
+**RISKY actions are not run blind.** When the user explicitly asks for one, re-check the
+invariant it threatens, back up anything it overwrites, then hand over a single
+copy-paste command and say what to check afterwards. "Never execute" deadlocks
+against a user who has decided; "execute carefully, with a backup" does not.
 
 ## Step 1 — Audit
 
@@ -161,6 +163,42 @@ deployment. Setting it wrongly routes data to the wrong edge.
 scripts/validate-tags.sh --env-file /etc/vector/pm2-axiom.env
 ```
 
+### Validate the token before enabling anything
+
+A token can pass every local check and still lack ingest permission for the
+target dataset. The only way to know is to send something.
+
+```bash
+scripts/validate-token.sh --env-file /etc/vector/pm2-axiom.env --dry-run   # check shape, send nothing
+scripts/validate-token.sh --env-file /etc/vector/pm2-axiom.env             # writes ONE probe record
+```
+
+The non-dry run **writes one record** to the dataset, marked
+`kind = "pm2-log-agent-selftest"` and `self_test = true`. Say so before running
+it. To remove it:
+
+```apl
+pm2-service-logs | where kind == "pm2-log-agent-selftest" and _time > ago(1h)
+```
+
+The token is never printed, and `AXIOM_REGION` changes which ingest path is
+correct — the default domain and an edge deployment use different URL shapes, and
+the wrong pairing returns a 404 that looks like a broken token.
+
+### One dataset for both streams
+
+Logs and host insights both go to `pm2-service-logs` by default. Every event
+carries `kind` (`pm2_log` or `host_insights`), so queries filter rather than
+cross-reference two datasets:
+
+```apl
+pm2-service-logs | where kind == "pm2_log"      and app == "api"
+pm2-service-logs | where kind == "host_insights" | mv-expand disks
+```
+
+Split them with `render-vector-config.sh --insights-dataset <name>`. Retention is
+a dataset-level setting in Axiom and is deliberately not managed here.
+
 Enforces: machine present, no reserved-name collisions, strict IPv4, no unbounded tag
 keys, and agreement between `assets/tag-policy.env` and the `TAGS` array in
 `assets/apply-tags.vrl`.
@@ -174,9 +212,32 @@ Surface it when `env` is proposed; let the user decide.
 Only after approval.
 
 ```bash
+# Everything at once. Requires root.
+scripts/install.sh --pm2-home /home/deploy/.pm2 --env-file ./pm2-axiom.env --plan   # show the plan first
+scripts/install.sh --pm2-home /home/deploy/.pm2 --env-file ./pm2-axiom.env
+
+# Or one piece at a time
 scripts/install-vector-pinned.sh                    # exact pinned version + sha256 gate
 scripts/render-vector-config.sh --pm2-home /home/deploy/.pm2 --out /etc/vector/pm2-axiom.toml
 scripts/render-vector-config.sh --insights --out /etc/vector/host-insights.toml
+```
+
+`install.sh` installs the unit **disabled on purpose**. Enabling a unit that
+crash-loops on a missing token is exactly what the two checks below prevent:
+
+```bash
+scripts/smoke-test.sh --config /etc/vector/pm2-axiom.toml   # runs it for real, with the sink swapped for console
+scripts/validate-token.sh --env-file /etc/vector/pm2-axiom.env
+systemctl enable --now pm2-logs-agent
+```
+
+`smoke-test.sh` starts the actual pipeline and asserts events come out. Without
+it you are enabling a service you have never watched start.
+
+To undo everything:
+
+```bash
+scripts/uninstall.sh --plan --yes
 ```
 
 Globs are derived from the audit's real `pm_out_log_path`/`pm_err_log_path`, never
@@ -230,7 +291,8 @@ changed. `mv-expand disks` gets per-disk rows from the insights dataset.
 
 ## Verified behaviour
 
-These were tested against the pinned binary, not assumed:
+Each of these was tested against the pinned binary, not assumed. Several were
+real bugs found by testing:
 
 - `parse-app.vrl` handles `-out-<pid>`, `-error-<pid>`, `merge_logs` (no pid), dashed app
   names, out-of-tree custom paths, and the `pm2.log` daemon log.
@@ -241,3 +303,17 @@ These were tested against the pinned binary, not assumed:
 - VRL cannot enumerate environment variables; each supported tag is listed explicitly.
 - The `exec` source defaults `include_stderr = true`; the insights template sets it false.
 - A config with neither `region` nor `url` passes `vector validate`.
+- **TOML single quotes are literal**, so `\\s` reaches VRL as a literal backslash-s and
+  matches nothing — and `vector validate` still passes, because it is a valid regex that
+  matches nothing. Patterns use single backslashes.
+- **With `multiline.mode = "continue_through"`, `start_pattern` must match ordinary log
+  lines.** An exception-only pattern silently drops *all* normal logging: measured 0
+  events from a normal log file.
+- **Once env-var interpolation is on, `${...}` is substituted inside comments too**, and a
+  missing variable aborts config load. Write `$${...}` to escape.
+- **Merged configs share a component-id namespace** and `data_dir` is a global option, so
+  repeating either is a duplicate-key error.
+- The Vector release tarball extracts to `vector-<arch>-<libc>/bin/`, not a
+  version-prefixed path. The installer locates the binary by pattern.
+- `pm2-logrotate` names rotated files `<file>.log-<date>`, which **match** `*.log`. The
+  exclude list must cover that form or every rotated archive is re-uploaded.

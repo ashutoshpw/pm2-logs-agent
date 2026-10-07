@@ -101,7 +101,7 @@ discarded **without an error**. New tags appear to work and simply arrive empty.
 This is why `validate-tags.sh` and the negative query both matter:
 
 ```apl
-pm2-logs | where _time > ago(1h) and machine == "web-01" | limit 1
+pm2-service-logs | where _time > ago(1h) and machine == "web-01" | limit 1
 ```
 
 Empty means the tags did not land. Confirm in the dataset's Fields panel.
@@ -189,10 +189,10 @@ the tag budget. Warnings do not fail the run; errors do.
 ## Verifying in Axiom
 
 ```apl
-pm2-logs | where _time > ago(1h) | summarize count() by machine
-pm2-logs | where _time > ago(1h) and public_ip != null    | limit 1
-pm2-logs | where _time > ago(1h) and tailscale_ip != null | limit 1
-pm2-logs | where _time > ago(1h)
+pm2-service-logs | where _time > ago(1h) | summarize count() by machine
+pm2-service-logs | where _time > ago(1h) and public_ip != null    | limit 1
+pm2-service-logs | where _time > ago(1h) and tailscale_ip != null | limit 1
+pm2-service-logs | where _time > ago(1h)
   | summarize has_ip = countif(public_ip != null) by machine
   | where has_ip == 0
 ```

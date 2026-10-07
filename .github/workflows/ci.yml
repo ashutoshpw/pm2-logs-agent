@@ -33,6 +33,14 @@ jobs:
       - name: Run test suite (Vector validation runs in Docker)
         run: ./tests/run-tests.sh
 
+      - name: Install/Uninstall plans must not touch the host
+        run: |
+          set -euo pipefail
+          # These must be no-ops without root and without --yes.
+          ./skills/pm2-logs-agent/scripts/install.sh \
+            --pm2-home /tmp --env-file skills/pm2-logs-agent/assets/pm2-axiom.env.example --plan
+          ./skills/pm2-logs-agent/scripts/uninstall.sh --plan
+
   validate-vector:
     name: vector validate (${{ matrix.version }})
     runs-on: ubuntu-latest
@@ -47,6 +55,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Render configs with no region (the default)
+        env:
+          AXIOM_DATASET: pm2-service-logs
+          SECRET_AXIOM_TOKEN: xaat-ci-placeholder-not-a-real-token
         run: |
           ./skills/pm2-logs-agent/scripts/render-vector-config.sh \
             --pm2-home /home/deploy/.pm2 --out /tmp/logs.toml
@@ -77,12 +88,19 @@ jobs:
           for f in logs insights logs-region insights-region; do
             echo "::group::/tmp/$f.toml"
             docker run --rm --entrypoint /usr/bin/vector \
-              -v /tmp:/x "timberio/vector:${{ matrix.version }}-debian" \
+              -v /tmp:/x \
+              -e AXIOM_DATASET=pm2-service-logs \
+              -e SECRET_AXIOM_TOKEN=xaat-ci-placeholder-not-a-real-token \
+              "timberio/vector:${{ matrix.version }}-debian" \
+              --dangerously-allow-env-var-interpolation \
               validate --no-environment -d "/x/$f.toml"
             echo "::endgroup::"
           done
 
       - name: VRL unit tests
+        env:
+          AXIOM_DATASET: pm2-service-logs
+          SECRET_AXIOM_TOKEN: xaat-ci-placeholder-not-a-real-token
         run: |
           set -euo pipefail
           for f in tests/fixtures/inputs/event-*.json; do

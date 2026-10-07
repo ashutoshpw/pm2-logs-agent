@@ -48,6 +48,22 @@ VECTOR_TAG_TAILSCALE_IP=100.101.102.103  # optional, Tailscale only
 `AXIOM_REGION` is optional and **unset by default**; Vector uses Axiom's default
 base domain unless your organization is on a non-default edge deployment.
 
+`scripts/validate-token.sh` proves ingest permission by writing **one probe
+record** tagged `kind = "pm2-log-agent-selftest"`, so a token that looks fine but
+lacks access to the dataset is caught before the pipeline is enabled.
+
+## One dataset by default
+
+Both streams go to **`pm2-service-logs`**, separated by a `kind` field:
+
+```apl
+pm2-service-logs | where kind == "pm2_log"        and app == "api"
+pm2-service-logs | where kind == "host_insights"  | mv-expand disks
+```
+
+Pass `--insights-dataset` to split them. Retention is a dataset-level setting in
+Axiom and is deliberately not managed here.
+
 ## Server insights every 30 minutes
 
 CPU busy% from a real `/proc/stat` delta, load against effective capacity,
@@ -70,10 +86,14 @@ skills/pm2-logs-agent/
   scripts/
     audit-pm2-logs.sh          read-only audit
     validate-tags.sh           tag linter
+    validate-token.sh          writes one probe record to prove ingest works
     probe-network.sh           public IPv4 + Tailscale IPv4
     render-vector-config.sh    renders a host-specific config
-    install-vector-pinned.sh   pinned install with a sha256 gate
+    smoke-test.sh              runs the pipeline for real, sink swapped for console
+    install.sh                 installs everything (requires root)
+    install-vector-pinned.sh   pinned Vector binary with a sha256 gate
     verify-post-change.sh      re-check invariants after a change
+    uninstall.sh               removes everything, restoring backups
   assets/
     vector.toml                log pipeline (validated against the pin)
     vector-insights.toml       30-minute insights pipeline

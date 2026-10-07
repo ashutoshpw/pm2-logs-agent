@@ -48,6 +48,20 @@ Every action gets a row:
 - After each action, re-check the invariant it was supposed to fix.
 - At the end, report before/after and re-run the audit.
 
+## Executing a RISKY action on request
+
+"Never execute RISKY" deadlocks against a user who has explicitly decided. When
+one is requested:
+
+1. **Re-check the invariant it threatens, right now.** For `pm2 save`, re-compare
+   the live list against `dump.pm2`. The answer may have changed since the audit.
+2. **Back up whatever it overwrites.** `cp "$PM2_HOME/dump.pm2" "$PM2_HOME/dump.pm2.bak"`.
+3. **Hand over one copy-paste command**, not a script.
+4. **Say what to check afterwards**, so a silent failure is caught.
+
+Backing up and verifying is what makes execution safe. Refusing is not
+protection, it is just an obstacle.
+
 ## Credential handling
 
 The Axiom token is a write credential for your dataset. Anyone holding it can
@@ -74,15 +88,31 @@ config refuses to start rather than degrading.
 That flag is a security control: it exists because a log producer that controls a
 templated field could otherwise write to arbitrary destinations.
 
-The approach here avoids it entirely. `apply-tags.vrl` reads the env vars with
-`get_env_var()`, which is a normal VRL function and needs no flag:
+Tags avoid it entirely — `apply-tags.vrl` reads them with `get_env_var()`, a
+normal VRL function needing no flag:
 
 ```vrl
 value, terr = get_env_var("VECTOR_TAG_MACHINE")
 ```
 
-So the env file supplies credentials at runtime, with no dangerous flags and no
-secrets in the config.
+**The sink's `token` and `dataset` cannot.** They are config values, not VRL, so
+`{{ get_env_var!(...) }}` is a parse error. Those two therefore DO use
+`${VAR}` interpolation, and the unit sets:
+
+```ini
+Environment=VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true
+```
+
+Two consequences worth knowing:
+
+- **A missing variable aborts config load** (`VECTOR_STRICT_ENV_VARS` defaults to
+  true). That is the desired fail-fast: without it Vector ships the literal
+  placeholder as the token and 401s every batch, silently.
+- **Every `${...}` in the file is substituted, including inside comments.** A
+  comment mentioning `${VAR}` aborts the load. Write `$${VAR}` to escape.
+
+Because a missing token is now a startup failure rather than a silent 401, run
+`scripts/smoke-test.sh` and `scripts/validate-token.sh` BEFORE enabling the unit.
 
 ## `AXIOM_REGION` is optional
 

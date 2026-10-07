@@ -31,10 +31,15 @@
 #   VECTOR_TAG_MACHINE=web-01 VECTOR_TAG_PUBLIC_IP=203.0.113.42 \
 #     vector vrl -i event.json -p apply-tags.vrl --print-object
 #
-# NOTE ON THE ENVIRONMENT-INTERPOLATION TRAP: Vector disables `${VAR}`
-# interpolation inside config files unless --dangerously-allow-env-var-
-# interpolation is passed. That governs *config file* templating, NOT
-# get_env_var() here, so this transform works without any dangerous flags.
+# NOTE ON THE ENVIRONMENT-INTERPOLATION TRAP: Vector disables config-file
+# interpolation unless --dangerously-allow-env-var-interpolation is passed.
+# That governs *config file* templating, NOT get_env_var() here, so this
+# transform needs no flag of its own. The sink's token and dataset DO use
+# config interpolation, which is why the unit enables the flag.
+#
+# This file is inlined into a config where interpolation is ON, so any literal
+# dollar-brace sequence written here would be substituted. A doubled $${VAR}
+# escapes to a single literal occurrence.
 # See references/risk-tiers.md.
 
 # Fields this pipeline owns. A user tag must never overwrite these: doing so
