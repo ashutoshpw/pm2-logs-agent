@@ -1,0 +1,88 @@
+# pm2-logs-agent — 30-minute host insights to Axiom
+#
+# A SEPARATE pipeline from the log pipeline, and a SEPARATE dataset. That
+# follows Axiom's own "separate by signal type" guidance: mixing periodic
+# server snapshots with high-volume application logs in one dataset makes
+# every query scan irrelevant data and inflates field counts.
+#
+# The insights dataset should be created in Axiom with Kind = Metrics.
+#
+# All measurements are SERVER-WIDE, never scoped to the user running PM2.
+#
+# Two options here are load-bearing and easy to get wrong:
+#
+#   include_stderr = false   Vector's exec source DEFAULTS THIS TO TRUE. Any
+#                             stray warning from host-insights.sh would become
+#                             a phantom host_insights event. The script keeps
+#                             stderr empty by design; this flag makes that
+#                             structural rather than a convention.
+#
+#   decoding.codec = "json"  The default is "bytes", which would drop the whole
+#                             snapshot into `message` and make every field
+#                             unqueryable.
+#
+# Generated copy: run render-vector-config.sh --insights, or copy this file and
+# adjust the command path.
+
+data_dir = "/var/lib/vector"
+
+# ---------------------------------------------------------------------------
+# source
+# ---------------------------------------------------------------------------
+
+[sources.host_insights]
+type = "exec"
+mode = "scheduled"
+command = ["/opt/pm2-logs-agent/host-insights.sh"]
+
+# MANDATORY false. See the note at the top of this file.
+include_stderr = false
+
+# 30 minutes. Change here rather than in the script so the cadence is visible
+# in one place; the script also stamps each event with this value.
+scheduled.exec_interval_secs = 1800
+
+decoding.codec = "json"
+
+# ---------------------------------------------------------------------------
+# transforms
+# ---------------------------------------------------------------------------
+
+# Reuses the SAME tag mechanism as the log pipeline, so machine / public_ip /
+# tailscale_ip are attached to insights rows too.
+[transforms.apply_tags]
+type = "remap"
+inputs = ["host_insights"]
+source = '''
+# >>> INLINE-BEGIN apply-tags.vrl
+placeholder
+# <<< INLINE-END
+'''
+
+# ---------------------------------------------------------------------------
+# sinks
+# ---------------------------------------------------------------------------
+
+[sinks.axiom_insights]
+type = "axiom"
+inputs = ["apply_tags"]
+
+dataset = "pm2-host-insights"
+
+# region is OPTIONAL; see assets/vector.toml for the rationale. Omitted here
+# means Axiom's default base domain is used.
+# region = "us-east-1.aws.edge.axiom.co"
+
+# Placeholder. The real token comes from the env file at runtime.
+token = "REPLACE_AT_INSTALL_TIME"
+
+compression = "zstd"
+batch.timeout_secs = 5
+
+# The insights sink has no `disk` buffer on purpose. If Axiom is unreachable,
+# a 30-minute snapshot backlog is not worth blocking a disk buffer for: the
+# script re-emits the CURRENT state on the next tick anyway, so a default
+# memory buffer drops the missed snapshot and self-heals. Keep it that way.
+[sinks.axiom_insights.buffer]
+type = "memory"
+when_full = "drop_newest"

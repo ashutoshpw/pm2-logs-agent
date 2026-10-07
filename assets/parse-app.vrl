@@ -1,0 +1,52 @@
+# pm2-logs-agent — derive identity from the PM2 log filename
+#
+# PM2 names log files predictably, which means the filename is enough to label
+# every event. Without this, every row in Axiom is an anonymous string and the
+# dataset is unqueryable by app or severity.
+#
+# Filenames this handles:
+#   /home/deploy/.pm2/logs/api-out-0.log       -> app=api  stream=out   pid=0
+#   /home/deploy/.pm2/logs/api-error-0.log     -> app=api  stream=error pid=0
+#   /home/deploy/.pm2/logs/api-out.log         -> app=api  stream=out   pid=null   (merge_logs: true)
+#   /home/deploy/.pm2/pm2.log                   -> app=pm2-daemon        (daemon log, not in logs/)
+#
+# The regex is greedy on `.*` so that app names containing dashes resolve
+# correctly: "my-out-app-out-5.log" -> app="my-out-app", stream="out".
+#
+# Test offline:  vector vrl -i event.json -p parse-app.vrl --print-object
+# where event.json is e.g. {"file":"/x/.pm2/logs/api-error-3.log","message":"boom"}
+
+# `[^/]*` rather than `.*` so a custom log path such as
+# /var/log/my-app/api-out-3.log yields app="api", not the whole directory
+# chain. Still greedy on dashes, so "my-out-app-out-5.log" resolves to
+# app="my-out-app".
+parsed, err = parse_regex(string(.file) ?? "", r'(?P<app>[^/]*)-(?P<stream>out|error)(?:-(?P<pid>\d+))?\.log$')
+
+if err == null && is_object(parsed) {
+  .app = parsed.app
+  .stream = parsed.stream
+  .severity = if parsed.stream == "error" { "error" } else { "info" }
+  .pm2_pid = parsed.pid
+} else {
+  # Covers $PM2_HOME/pm2.log and any log file PM2 wrote with a custom path we
+  # could not pattern-match. Still labelled, never dropped.
+  .app = "pm2-daemon"
+  .stream = "PM2"
+  .severity = "info"
+}
+
+# Axiom expects _time (Vector >= 0.42.0). Vector's file source calls this
+# field `timestamp`; make the rename explicit so the Axiom schema is stable
+# and does not depend on sink-side guessing.
+#
+# NOTE: on Vector <= 0.41.1 Axiom expects `@timestamp` instead. The skill's
+# audit reports version drift against assets/vector-version.env, whose known
+# good floor (0.58.0) is far above that boundary.
+# NOTE: this must be `._time` (a field path), not `_time` (a bare variable).
+# A bare `_time = ...` parses fine and silently assigns a local VRL variable
+# that never reaches the event, leaving Axiom to default the timestamp to
+# ingest time. Verified against 0.59.0; CI re-checks this.
+._time = if exists(.timestamp) && is_timestamp(.timestamp) { .timestamp } else { now() }
+del(.timestamp)
+
+.service = "pm2"

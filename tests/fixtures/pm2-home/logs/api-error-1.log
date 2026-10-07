@@ -1,0 +1,3 @@
+Error: boom
+    at foo (/app/x.js:1:1)
+    at bar (/app/y.js:2:2)

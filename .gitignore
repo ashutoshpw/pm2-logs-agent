@@ -1,0 +1,20 @@
+# Never commit a filled-in env file: it contains an Axiom ingestion token.
+*.env
+!*.env.example
+pm2-axiom.env
+
+# Audit and verification output may contain host paths and addresses.
+pm2-logs-audit-*.md
+pm2-logs-audit-*.json
+verify-*.json
+
+# Rendered configs carry resolved host paths.
+rendered*.toml
+*.rendered.toml
+
+# Local scratch
+*.swp
+*.bak
+*.orig
+*~
+.DS_Store

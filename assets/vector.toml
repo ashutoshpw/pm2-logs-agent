@@ -1,0 +1,155 @@
+# pm2-logs-agent — PM2 logs to Axiom
+#
+# Validated against the pinned Vector version in assets/vector-version.env.
+# Regenerate a host-specific copy with:
+#     scripts/render-vector-config.sh --out /etc/vector/pm2-axiom.toml
+#
+# The include globs below are EXAMPLES. They are derived in production by
+# scripts/audit-pm2-logs.sh, which reads the real pm_out_log_path and
+# pm_err_log_path from `pm2 jlist`. Never hand-write these: a PM2 app with a
+# custom out_file writes outside ~/.pm2/logs and is silently missed.
+#
+# CREDENTIALS come from EnvironmentFile=/etc/vector/pm2-axiom.env (mode 0600).
+# They are deliberately NOT interpolated with ${VAR} here. Vector disables
+# config-file env interpolation unless
+# --dangerously-allow-env-var-interpolation is passed, and
+# VECTOR_STRICT_ENV_VARS defaults to true, so a missing variable is a hard
+# load failure. render-vector-config.sh wires the env-file-backed sink; see
+# references/risk-tiers.md for the full explanation.
+
+data_dir = "/var/lib/vector"
+
+# ---------------------------------------------------------------------------
+# source
+# ---------------------------------------------------------------------------
+
+[sources.pm2_logs]
+type = "file"
+
+include = [
+  "/home/deploy/.pm2/logs/*.log",
+  "/home/deploy/.pm2/pm2.log",
+]
+
+# FIRST RUN ONLY. With read_from = "beginning" Vector ingests every existing
+# line, which on a long-lived box can be gigabytes. ignore_older_secs caps that
+# historical backfill. Once the backfill completes, switch read_from to "end"
+# so restarts resume from Vector's checkpoint instead of re-reading files.
+read_from = "beginning"
+ignore_older_secs = 86400
+
+# `fingerprint` (NOT `fingerprint_lines`) is the correct key on 0.59.0;
+# fingerprint_lines was removed and is now fingerprint.lines.
+#
+# checksum (the default) identifies files by content, which survives every
+# rotation strategy including copytruncate. device_and_inode is faster but
+# breaks when inodes are reused. Checksum is the right default for log files.
+fingerprint.strategy = "checksum"
+fingerprint.lines = 3
+max_line_bytes = 32768
+
+# Bridge the copytruncate gap. Vector's docs recommend pairing delaycompress
+# on the logrotate side with including the FIRST rotated file here, so Vector
+# can re-read a rotated file and pick up anything written between its last
+# read and the rotation event. pm2-logrotate compresses by default, so the
+# pattern below matches both the live and first-rotated files.
+exclude = [
+  "/home/deploy/.pm2/logs/*.log.*.gz",
+]
+
+# Multi-line stack traces. Without this, every `at ...` frame becomes its own
+# Axiom row and traces are unreadable.
+#
+# start_pattern matches the FIRST line of a new record. condition_pattern
+# matches every line after that, which belongs to the same record.
+#
+# Tuned for the standard Node stack shape:
+#   start_pattern      -> an Error/Exception line begins a stack trace
+#   condition_pattern  -> indented `at ...` frames and bare Exception text
+#                         continue it
+# This is the one genuinely app-specific part of the pipeline; adjust for
+# Java/Python tracebacks. See references/pm2-log-layout.md.
+[sources.pm2_logs.multiline]
+mode = "continue_through"
+start_pattern = '^(?:[A-Za-z_$][\\w$]*(?:Error|Exception)\\b|Error:)'
+condition_pattern = '^\\s+at\\s|^\\s*at\\s|^\\s*\\^+\\s*$|^\\s*(?:[A-Za-z_$][\\w$]*(?:Error|Exception)\\b|Error:)|^\\s+\\{|^\\s+\\[|^\\s+code:'
+timeout_ms = 1000
+
+# ---------------------------------------------------------------------------
+# transforms
+# ---------------------------------------------------------------------------
+
+# Derive app / stream / severity / pm2_pid from the filename and normalise the
+# timestamp field to the _time name Axiom expects.
+[transforms.parse_app]
+type = "remap"
+inputs = ["pm2_logs"]
+# NOTE: no `include` directive exists in VRL — `include "parse-app.vrl"` is a
+# syntax error (E203). scripts/render-vector-config.sh inlines the .vrl file
+# between the markers below. The separate .vrl file exists so it can be
+# unit-tested offline with `vector vrl`.
+source = '''
+# >>> INLINE-BEGIN parse-app.vrl
+placeholder
+# <<< INLINE-END
+'''
+
+# Attach VECTOR_TAG_* values to every event.
+[transforms.apply_tags]
+type = "remap"
+inputs = ["parse_app"]
+source = '''
+# >>> INLINE-BEGIN apply-tags.vrl
+placeholder
+# <<< INLINE-END
+'''
+
+# ---------------------------------------------------------------------------
+# sinks
+# ---------------------------------------------------------------------------
+
+[sinks.axiom]
+type = "axiom"
+inputs = ["apply_tags"]
+
+# Axiom edge deployment base domain: no scheme, no trailing slash.
+#   us-east-1.aws.edge.axiom.co     (US East 1, AWS)
+#   eu-central-1.aws.edge.axiom.co  (EU Central 1, AWS)
+#
+# `region` is OPTIONAL and is deliberately left commented out. When absent,
+# Vector's axiom sink uses Axiom's default base domain (api.axiom.co), which is
+# correct for most organizations. Verified on 0.59.0: a sink with neither
+# `region` nor `url` passes `vector validate`.
+#
+# Uncomment ONLY when Axiom -> Settings -> General shows a non-default edge
+# deployment. Setting it wrongly routes data to the wrong edge, which is worse
+# than leaving it unset. render-vector-config.sh writes this line only when
+# --region is passed explicitly.
+#region = "us-east-1.aws.edge.axiom.co"
+#
+# NOTE: the axiom sink is BETA in Vector 0.59.0, with at-least-once delivery.
+# Duplicates are possible on retry. See references/vector-axiom-sink.md.
+dataset = "pm2-logs"
+
+# Placeholder only. pm2-logs-agent never writes a real token into the repo,
+# and the skill requires the token to be supplied via the env file. Replace
+# this by running render-vector-config.sh, which wires the sink to read
+# AXIOM_TOKEN and AXIOM_DATASET from the env file at runtime.
+token = "REPLACE_AT_INSTALL_TIME"
+
+# org_id is required ONLY for personal tokens. Leave unset for
+# service-account tokens.
+# org_id = "..."
+
+compression = "zstd"
+batch.timeout_secs = 2
+batch.max_events = 1000
+acknowledgements.enabled = true
+
+# Disk buffer rather than the in-memory default, so a crash or an Axiom outage
+# does not lose events. max_size MUST be at least ~256 MiB (268435488 bytes)
+# or Vector rejects the config outright.
+[sinks.axiom.buffer]
+type = "disk"
+max_size = 536870912
+when_full = "block"

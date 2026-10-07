@@ -1,0 +1,95 @@
+# pm2-logs-agent — apply custom tags to every event
+#
+# Every VECTOR_TAG_* environment variable listed in TAGS below becomes a
+# lowercase field on every event. This is the single mechanism behind all
+# tagging: machine name, public IPv4, Tailscale IP, and user extras.
+#
+# Optionality is free: a tag whose env var is absent produces no field at
+# all, so Axiom sees the field only on the machines that have it. Because
+# Axiom's schema is defined on read, a field present on some hosts and absent
+# on others is fine — queries just need `where public_ip != null`.
+#
+# WHY THIS IS AN EXPLICIT LIST: VRL cannot enumerate environment variables.
+# There is no `environment_variables` function — on 0.59.0 it is a compile
+# error (E701 undefined variable). Only get_env_var("NAME") exists, so each
+# supported tag must be named literally.
+#
+# WHY THIS ACCUMULATES INTO A LOCAL OBJECT: `set!` inside a for_each closure
+# mutates a copy, not the event. Writing `. = merge(., tags)` once outside
+# the loop is what actually lands the fields. Verified on 0.59.0; the naive
+# in-closure variant produces events with no tags and no error.
+#
+# Consequence: adding a tag means editing TWO places.
+#   1. the TAGS array below
+#   2. assets/tag-policy.env (so validate-tags.sh enforces the rules)
+# tests/run-tests.sh asserts the two agree.
+#
+# Configured via EnvironmentFile=/etc/vector/pm2-axiom.env
+# See assets/pm2-axiom.env.example.
+#
+# Test offline:
+#   VECTOR_TAG_MACHINE=web-01 VECTOR_TAG_PUBLIC_IP=203.0.113.42 \
+#     vector vrl -i event.json -p apply-tags.vrl --print-object
+#
+# NOTE ON THE ENVIRONMENT-INTERPOLATION TRAP: Vector disables `${VAR}`
+# interpolation inside config files unless --dangerously-allow-env-var-
+# interpolation is passed. That governs *config file* templating, NOT
+# get_env_var() here, so this transform works without any dangerous flags.
+# See references/risk-tiers.md.
+
+# Fields this pipeline owns. A user tag must never overwrite these: doing so
+# would silently mislabel every event in the dataset. Two groups:
+#   1. Axiom system fields (Axiom refuses to delete these)
+#   2. Fields derived from the PM2 log filename by parse-app.vrl
+RESERVED = [
+  "_time", "_sysTime",
+  "message", "app", "stream", "severity", "host", "file", "pm2_pid",
+  "pid", "command", "source_type", "timestamp", "data_stream", "service",
+]
+
+# [env var suffix, emitted field name]
+# Keep in sync with TAG_* entries in assets/tag-policy.env.
+TAGS = [
+  ["MACHINE",       "machine"],
+  ["PUBLIC_IP",     "public_ip"],
+  ["TAILSCALE_IP",  "tailscale_ip"],
+  ["ENV",           "env"],
+  ["REGION",        "region"],
+  ["ROLE",          "role"],
+  ["TEAM",          "team"],
+  ["CLUSTER",       "cluster"],
+  ["SERVICE",       "service"],
+  ["DEPLOY_ID",     "deploy_id"],
+]
+
+tags = {}
+
+# for_each over an ARRAY yields (index, element) — two args, not one.
+for_each(TAGS) -> |_idx, entry| {
+  suffix = entry[0]
+  field = entry[1]
+  value, terr = get_env_var("VECTOR_TAG_" + suffix)
+
+  if terr == null && is_string(value) && value != "" {
+    if includes(RESERVED, field) {
+      log("pm2-logs-agent: refusing to set reserved field '" + field + "' from VECTOR_TAG_" + suffix, level: "warn")
+    } else {
+      updated, serr = set(value: tags, path: [field], data: value)
+      if serr == null {
+        tags = updated
+      } else {
+        log("pm2-logs-agent: could not set tag field '" + field + "'", level: "warn")
+      }
+    }
+  }
+  # Otherwise: env var absent, empty, or non-string -> optional tag omitted.
+}
+
+. = merge(., tags)
+
+# The machine tag is mandatory. Without it the dataset is not queryable by
+# host. The skill blocks setup before this point; this is the per-event
+# backstop so a misconfiguration is visible in Vector's own logs.
+if !exists(.machine) {
+  log("pm2-logs-agent: VECTOR_TAG_MACHINE is not set — events will have no machine tag", level: "error")
+}

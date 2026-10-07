@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: shellcheck + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck + jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck jq
+
+      - name: shellcheck
+        run: |
+          status=0
+          for f in scripts/*.sh assets/host-insights.sh tests/run-tests.sh; do
+            echo "::group::$f"
+            shellcheck -S warning "$f" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Run test suite (Vector validation runs in Docker)
+        run: ./tests/run-tests.sh
+
+  validate-vector:
+    name: vector validate (${{ matrix.version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The pinned version plus the known-good floor, so the templates are
+        # proven to work on both. Pinned version lives in assets/vector-version.env.
+        version: ["0.59.0", "0.58.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render configs with no region (the default)
+        run: |
+          ./scripts/render-vector-config.sh --pm2-home /home/deploy/.pm2 \
+            --out /tmp/logs.toml
+          ./scripts/render-vector-config.sh --insights --out /tmp/insights.toml
+
+      - name: Render configs with an explicit region
+        run: |
+          ./scripts/render-vector-config.sh --region eu-central-1.aws.edge.axiom.co \
+            --out /tmp/logs-region.toml
+          ./scripts/render-vector-config.sh --insights \
+            --region eu-central-1.aws.edge.axiom.co --out /tmp/insights-region.toml
+
+      - name: Assert no region key by default
+        run: |
+          set -euo pipefail
+          for f in /tmp/logs.toml /tmp/insights.toml; do
+            if grep -qE '^region = ' "$f"; then
+              echo "::error file=$f::region must not be emitted unless --region is passed"
+              exit 1
+            fi
+          done
+          echo "OK: region is optional and unset by default"
+
+      - name: vector validate
+        run: |
+          set -euo pipefail
+          for f in logs insights logs-region insights-region; do
+            echo "::group::/tmp/$f.toml"
+            docker run --rm --entrypoint /usr/bin/vector \
+              -v /tmp:/x "timberio/vector:${{ matrix.version }}-debian" \
+              validate --no-environment -d "/x/$f.toml"
+            echo "::endgroup::"
+          done
+
+      - name: VRL unit tests
+        run: |
+          set -euo pipefail
+          for f in tests/fixtures/inputs/event-*.json; do
+            b=$(basename "$f")
+            echo "::group::$b"
+            docker run --rm --entrypoint /usr/bin/vector \
+              -v "$PWD:/r:ro" "timberio/vector:${{ matrix.version }}-debian" \
+              vrl -i "/r/tests/fixtures/inputs/$b" -p /r/assets/parse-app.vrl --print-object
+            echo "::endgroup::"
+          done
+
+  skill-manifest:
+    name: SKILL.md constraints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check frontmatter and size limits
+        run: |
+          set -euo pipefail
+          fail=0
+
+          # Frontmatter must be parseable and have name + description.
+          python3 - <<'PY' || fail=1
+          import sys, pathlib, re
+          text = pathlib.Path("SKILL.md").read_text()
+          if not text.startswith("---\n"):
+              print("::error::SKILL.md does not start with YAML frontmatter"); sys.exit(1)
+          end = text.find("\n---\n", 4)
+          if end == -1:
+              print("::error::unterminated frontmatter"); sys.exit(1)
+          fm = text[4:end]
+          for field in ("name", "description"):
+              if not re.search(rf"^{field}:", fm, re.M):
+                  print(f"::error::missing required frontmatter field: {field}"); sys.exit(1)
+          name = re.search(r"^name:\s*(\S+)", fm, re.M).group(1)
+          if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", name):
+              print(f"::error::name '{name}' must be lowercase letters/digits/hyphens"); sys.exit(1)
+          if len(name) > 64:
+              print("::error::name exceeds 64 chars"); sys.exit(1)
+          # Fold the folded description block into one line.
+          desc = re.search(r"^description:\s*>-\n((?:[ \t]+.*\n?)*)", fm, re.M)
+          raw = desc.group(1) if desc else re.search(r"^description:\s*(.+)$", fm, re.M).group(1)
+          d = " ".join(x.strip() for x in raw.splitlines() if x.strip())
+          print(f"description length: {len(d)} chars")
+          if len(d) > 1024:
+              print(f"::error::description is {len(d)} chars, limit is 1024"); sys.exit(1)
+          print(f"name: {name}")
+          PY
+
+          lines=$(wc -l < SKILL.md)
+          echo "SKILL.md: $lines lines"
+          if [ "$lines" -gt 500 ]; then
+            echo "::error::SKILL.md is $lines lines, limit is 500"
+            fail=1
+          fi
+
+          # Only scripts/, references/, assets/ are allowed as skill subdirs.
+          for d in scripts references assets; do
+            [ -d "$d" ] || { echo "::error::missing $d/"; fail=1; }
+          done
+
+          exit $fail

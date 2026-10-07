@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# pm2 test stub.
+#
+# Log paths derive from $PM2_HOME so the fixture tree is self-consistent:
+#   api     -> both files inside the default logs/ dir  (in-tree)
+#   worker  -> error log deliberately OUT of tree        (must be flagged)
+#
+# The dump.pm2 fixture lists 4 apps while only 2 run here, which is the
+# "pm2 save would drop apps" case the audit must report as critical.
+PM2_HOME_DIR="${PM2_HOME:-$HOME/.pm2}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+case "$1" in
+  --version) echo "5.4.2"; exit 0 ;;
+  ping)      exit 0 ;;
+  ls)        printf '┌──────────┬────┐\n│ pm2-logrotate │ 0 │\n└──────────┴────┘\n'; exit 0 ;;
+  jlist)
+    cat <<JSON
+[
+  {"name":"api","pm_id":0,"pm2_env":{"status":"online",
+    "pm_out_log_path":"$PM2_HOME_DIR/logs/api-out-0.log",
+    "pm_err_log_path":"$PM2_HOME_DIR/logs/api-error-0.log",
+    "log_type":"raw","merge_logs":false,"instances":1}},
+  {"name":"worker","pm_id":1,"pm2_env":{"status":"online",
+    "pm_out_log_path":"$PM2_HOME_DIR/logs/worker-out-0.log",
+    "pm_err_log_path":"$REPO_ROOT/tests/fixtures/custom-logs/worker-error-0.log",
+    "log_type":"raw","merge_logs":true,"instances":2}}
+]
+JSON
+    exit 0 ;;
+esac
+exit 0

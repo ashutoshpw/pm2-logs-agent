@@ -1,0 +1,6 @@
+[
+  {"name":"api","pm2_env":{"status":"online","pm_out_log_path":"/home/deploy/.pm2/logs/api-out-0.log","pm_err_log_path":"/home/deploy/.pm2/logs/api-error-0.log"}},
+  {"name":"worker","pm2_env":{"status":"online","pm_out_log_path":"/home/deploy/.pm2/logs/worker-out-0.log","pm_err_log_path":"/var/log/worker/err.log"}},
+  {"name":"cron","pm2_env":{"status":"stopped","pm_out_log_path":"/home/deploy/.pm2/logs/cron-out.log","pm_err_log_path":"/home/deploy/.pm2/logs/cron-error.log"}},
+  {"name":"legacy-api","pm2_env":{"status":"stopped","pm_out_log_path":"/home/deploy/.pm2/logs/legacy-api-out.log","pm_err_log_path":"/home/deploy/.pm2/logs/legacy-api-error.log"}}
+]

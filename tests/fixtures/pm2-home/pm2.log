@@ -1,0 +1,12 @@
+App [api] exited with code 1
+App [api] restarted with pid 412
+App [worker] exited with code 0
+App [worker] exited with code 0
+App [worker] restarted with pid 418
+PM2 log: --- New PM2 Daemon started ----------------------------------------------
+PM2 log: Time                 : Wed Oct 07 2026 11:18:29 GMT+0000
+PM2 log: PM2 version          : 5.4.2
+PM2 log: Node version         : v20.11.0
+PM2 log: Current node version : v20.11.0
+PM2 log: Managed RPC provider : fork
+PM2 log: Busy Intervals      : 1000

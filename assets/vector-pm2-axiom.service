@@ -1,0 +1,60 @@
+[Unit]
+Description=pm2-logs-agent — PM2 logs to Axiom
+Documentation=https://github.com/ashutoshpw/pm2-logs-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vector
+Group=vector
+
+# Credentials and tags. MUST be mode 0600 and root-owned.
+EnvironmentFile=/etc/vector/pm2-axiom.env
+
+# --require-healthy makes Vector exit if the Axiom sink fails its startup
+# healthcheck, so systemd surfaces a broken pipeline instead of leaving a
+# silently degraded process running. Combine with Restart=always and
+# RestartSec for a retry loop rather than a one-shot failure.
+ExecStart=/usr/bin/vector --config /etc/vector/pm2-axiom.toml --require-healthy
+
+# Reloads the config on SIGHUP, matching Vector's graceful reload behaviour.
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=5s
+
+# Do not kill the process on the final SIGTERM immediately; let in-flight
+# batches drain to the disk buffer. Must exceed Vector's own 60s default.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+# ---- hardening -----------------------------------------------------------
+# Read access to the PM2 log dir must be granted to the vector user, e.g.:
+#   usermod -aG deploy vector
+# or by ACL:
+#   setfacl -R -m u:vector:rX /home/deploy/.pm2/logs
+#
+# ProtectHome=read-only still allows READING /home, which is required here.
+# Do NOT use ProtectHome=true: it would block the PM2 log directory entirely
+# and Vector would silently ingest nothing.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/vector
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
