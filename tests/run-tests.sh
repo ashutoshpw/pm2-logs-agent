@@ -18,8 +18,12 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ASSETS="$REPO_DIR/assets"
-SCRIPTS="$REPO_DIR/scripts"
+# The skill payload lives under skills/<name>/ so the repo root can keep its own
+# README, licence and CI without shipping them into every agent's install.
+SKILL_DIR="$REPO_DIR/skills/pm2-logs-agent"
+ASSETS="$SKILL_DIR/assets"
+SCRIPTS="$SKILL_DIR/scripts"
+SKILL_MD="$SKILL_DIR/SKILL.md"
 FIXTURES="$REPO_DIR/tests/fixtures"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -72,7 +76,7 @@ vrl_run() {
   [ -n "$VECTOR_IMG" ] || return 2
   docker run --rm --entrypoint /usr/bin/vector \
     -v "$REPO_DIR:/r:ro" "$VECTOR_IMG" \
-    vrl -i "/r/tests/fixtures/inputs/$1" -p "/r/assets/$2" --print-object 2>&1 \
+    vrl -i "/r/tests/fixtures/inputs/$1" -p "/r/skills/pm2-logs-agent/assets/$2" --print-object 2>&1 \
     | grep -v 'INFO vector' \
     | sed -E "s/t'([^']*)'/\"\1\"/g"
 }
@@ -147,7 +151,7 @@ if [ -n "$VECTOR_IMG" ]; then
     docker run --rm --entrypoint /usr/bin/vector \
       -e VECTOR_TAG_MACHINE=web-01 "$@" \
       -v "$REPO_DIR:/r:ro" "$VECTOR_IMG" \
-      vrl -i /r/tests/fixtures/inputs/event-out.json -p /r/assets/apply-tags.vrl --print-object 2>&1 \
+      vrl -i /r/tests/fixtures/inputs/event-out.json -p /r/skills/pm2-logs-agent/assets/apply-tags.vrl --print-object 2>&1 \
       | grep -v 'INFO vector' \
       | sed -E "s/t'([^']*)'/\"\1\"/g"
   }
@@ -422,9 +426,9 @@ for s in "$SCRIPTS"/*.sh "$ASSETS/host-insights.sh"; do
 done
 
 # SKILL.md constraints.
-skill_lines=$(wc -l < "$REPO_DIR/SKILL.md" | tr -d ' ')
+skill_lines=$(wc -l < "$SKILL_MD" | tr -d ' ')
 [ "$skill_lines" -le 500 ] && ok "SKILL.md ${skill_lines} lines (<= 500)" || bad "SKILL.md too long" "$skill_lines lines"
-desc_len=$(awk '/^description:/{f=1;next} f&&/^  /{gsub(/^ +/,"");printf "%s",$0} f&&!/^  /{exit}' "$REPO_DIR/SKILL.md" | wc -c | tr -d ' ')
+desc_len=$(awk '/^description:/{f=1;next} f&&/^  /{gsub(/^ +/,"");printf "%s",$0} f&&!/^  /{exit}' "$SKILL_MD" | wc -c | tr -d ' ')
 [ "$desc_len" -le 1024 ] && ok "description ${desc_len} chars (<= 1024)" || bad "description too long" "$desc_len chars"
 
 # ===========================================================================

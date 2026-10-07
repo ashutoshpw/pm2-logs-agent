@@ -8,7 +8,7 @@
 # The dump.pm2 fixture lists 4 apps while only 2 run here, which is the
 # "pm2 save would drop apps" case the audit must report as critical.
 PM2_HOME_DIR="${PM2_HOME:-$HOME/.pm2}"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # tests/fixtures/bin -> repo root
 
 case "$1" in
   --version) echo "5.4.2"; exit 0 ;;

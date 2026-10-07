@@ -2,6 +2,12 @@
 
 ## 1.0.0
 
+### Changed
+- Skill payload lives at `skills/pm2-logs-agent/`. `skills/` is a first-class
+  discovery location in the spec, and keeping the payload there means the repo
+  README, licence, CI and test suite no longer ship into every agent install.
+  Only `scripts/`, `references/` and `assets/` travel with the skill.
+
 Initial release.
 
 ### Audit

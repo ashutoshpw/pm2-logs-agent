@@ -60,28 +60,35 @@ rather than silently dropped.
 
 ## Layout
 
+The skill lives under `skills/pm2-logs-agent/` so the repository root can keep
+its README, licence and CI without shipping them into every agent install. Only
+`scripts/`, `references/` and `assets/` travel with the skill.
+
 ```
-SKILL.md                     the skill
-assets/
-  vector.toml                log pipeline (validated against the pin)
-  vector-insights.toml       30-minute insights pipeline
-  host-insights.sh           snapshot emitter
-  parse-app.vrl              filename -> app/stream/severity
-  apply-tags.vrl             VECTOR_TAG_* -> event fields
-  vector-version.env         pinned Vector version + checksums
-  tag-policy.env             tag rules
-  pm2-axiom.env.example      credentials and tags template
-  vector-pm2-axiom.service   hardened systemd unit
-  queries.axiom              verification queries
-scripts/
-  audit-pm2-logs.sh          read-only audit
-  validate-tags.sh           tag linter
-  probe-network.sh           public IPv4 + Tailscale IPv4
-  render-vector-config.sh    renders a host-specific config
-  install-vector-pinned.sh   pinned install with a sha256 gate
-  verify-post-change.sh      re-check invariants after a change
-references/                  deep dives, loaded on demand
-tests/run-tests.sh           test suite
+skills/pm2-logs-agent/
+  SKILL.md                     the skill
+  scripts/
+    audit-pm2-logs.sh          read-only audit
+    validate-tags.sh           tag linter
+    probe-network.sh           public IPv4 + Tailscale IPv4
+    render-vector-config.sh    renders a host-specific config
+    install-vector-pinned.sh   pinned install with a sha256 gate
+    verify-post-change.sh      re-check invariants after a change
+  assets/
+    vector.toml                log pipeline (validated against the pin)
+    vector-insights.toml       30-minute insights pipeline
+    host-insights.sh           snapshot emitter
+    parse-app.vrl              filename -> app/stream/severity
+    apply-tags.vrl             VECTOR_TAG_* -> event fields
+    vector-version.env         pinned Vector version + checksums
+    tag-policy.env             tag rules
+    pm2-axiom.env.example      credentials and tags template
+    vector-pm2-axiom.service   hardened systemd unit
+    queries.axiom              verification queries
+  references/                  deep dives, loaded on demand
+
+tests/                         repo-level test suite (not installed)
+.github/workflows/ci.yml
 ```
 
 ## Pinning

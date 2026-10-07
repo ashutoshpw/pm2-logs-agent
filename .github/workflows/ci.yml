@@ -23,7 +23,7 @@ jobs:
       - name: shellcheck
         run: |
           status=0
-          for f in scripts/*.sh assets/host-insights.sh tests/run-tests.sh; do
+          for f in skills/pm2-logs-agent/scripts/*.sh skills/pm2-logs-agent/assets/host-insights.sh tests/run-tests.sh; do
             echo "::group::$f"
             shellcheck -S warning "$f" || status=1
             echo "::endgroup::"
@@ -40,23 +40,25 @@ jobs:
       fail-fast: false
       matrix:
         # The pinned version plus the known-good floor, so the templates are
-        # proven to work on both. Pinned version lives in assets/vector-version.env.
+        # proven to work on both. Pinned version lives in
+        # skills/pm2-logs-agent/assets/vector-version.env.
         version: ["0.59.0", "0.58.0"]
     steps:
       - uses: actions/checkout@v4
 
       - name: Render configs with no region (the default)
         run: |
-          ./scripts/render-vector-config.sh --pm2-home /home/deploy/.pm2 \
-            --out /tmp/logs.toml
-          ./scripts/render-vector-config.sh --insights --out /tmp/insights.toml
+          ./skills/pm2-logs-agent/scripts/render-vector-config.sh \
+            --pm2-home /home/deploy/.pm2 --out /tmp/logs.toml
+          ./skills/pm2-logs-agent/scripts/render-vector-config.sh \
+            --insights --out /tmp/insights.toml
 
       - name: Render configs with an explicit region
         run: |
-          ./scripts/render-vector-config.sh --region eu-central-1.aws.edge.axiom.co \
-            --out /tmp/logs-region.toml
-          ./scripts/render-vector-config.sh --insights \
-            --region eu-central-1.aws.edge.axiom.co --out /tmp/insights-region.toml
+          R=./skills/pm2-logs-agent/scripts/render-vector-config.sh
+          "$R" --region eu-central-1.aws.edge.axiom.co --out /tmp/logs-region.toml
+          "$R" --insights --region eu-central-1.aws.edge.axiom.co \
+            --out /tmp/insights-region.toml
 
       - name: Assert no region key by default
         run: |
@@ -88,7 +90,8 @@ jobs:
             echo "::group::$b"
             docker run --rm --entrypoint /usr/bin/vector \
               -v "$PWD:/r:ro" "timberio/vector:${{ matrix.version }}-debian" \
-              vrl -i "/r/tests/fixtures/inputs/$b" -p /r/assets/parse-app.vrl --print-object
+              vrl -i "/r/tests/fixtures/inputs/$b" \
+                -p /r/skills/pm2-logs-agent/assets/parse-app.vrl --print-object
             echo "::endgroup::"
           done
 
@@ -105,7 +108,7 @@ jobs:
           # Frontmatter must be parseable and have name + description.
           python3 - <<'PY' || fail=1
           import sys, pathlib, re
-          text = pathlib.Path("SKILL.md").read_text()
+          text = pathlib.Path("skills/pm2-logs-agent/SKILL.md").read_text()
           if not text.startswith("---\n"):
               print("::error::SKILL.md does not start with YAML frontmatter"); sys.exit(1)
           end = text.find("\n---\n", 4)
@@ -130,16 +133,20 @@ jobs:
           print(f"name: {name}")
           PY
 
-          lines=$(wc -l < SKILL.md)
+          lines=$(wc -l < skills/pm2-logs-agent/SKILL.md)
           echo "SKILL.md: $lines lines"
           if [ "$lines" -gt 500 ]; then
             echo "::error::SKILL.md is $lines lines, limit is 500"
             fail=1
           fi
 
+          # The skill must live at skills/<name>/ so the repo root can keep its
+          # README, licence and CI without shipping them into every install.
+          [ -d skills/pm2-logs-agent ] || { echo "::error::missing skills/pm2-logs-agent/"; fail=1; }
+
           # Only scripts/, references/, assets/ are allowed as skill subdirs.
           for d in scripts references assets; do
-            [ -d "$d" ] || { echo "::error::missing $d/"; fail=1; }
+            [ -d "skills/pm2-logs-agent/$d" ] || { echo "::error::missing skills/pm2-logs-agent/$d"; fail=1; }
           done
 
           exit $fail

@@ -124,6 +124,10 @@ If the user is ambiguous or does not answer, **apply nothing**.
 
 ## Never do these without asking
 
+All paths below are relative to this skill's own directory (`scripts/…`,
+`assets/…`, `references/…`), which is where they resolve both in the repository
+and inside an agent's install.
+
 - Run `pm2 save` reflexively. It can bake in a snapshot *worse* than the current one.
 - `pm2 restart`/`reload` to "apply" a log-path change. PM2 log paths need a real restart,
   which is downtime.

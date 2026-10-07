@@ -1,13 +1,13 @@
 # Never commit a filled-in credential env file: it holds an Axiom ingestion
 # token.
 #
-# The two TRACKED files assets/tag-policy.env and assets/vector-version.env are
-# matched by `*.env` and must be re-included, otherwise a clean clone is missing
-# them and every script aborts on an unbound variable.
+# `*.env` also matches two TRACKED files under the skill payload that the
+# scripts source. They must be re-included explicitly, otherwise a clean clone
+# is missing them and every script aborts on an unbound variable.
 *.env
 !*.env.example
-!assets/tag-policy.env
-!assets/vector-version.env
+!skills/pm2-logs-agent/assets/tag-policy.env
+!skills/pm2-logs-agent/assets/vector-version.env
 pm2-axiom.env
 
 # Audit and verification output may contain host paths and addresses.
